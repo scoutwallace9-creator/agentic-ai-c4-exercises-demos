@@ -30,6 +30,7 @@ def create_diagram(title, nodes, edges, node_labels=None, node_types=None, edge_
     pos["Arrernte Language Specialist"] = (2*horizontal_spacing, vertical_spacing)
     pos["Pitjantjatjara Language Specialist"] = (2*horizontal_spacing, -vertical_spacing)
     pos["Knowledge Base Lookup"] = (3*horizontal_spacing, 0)
+    pos["Multimodal Media Tool"] = (3*horizontal_spacing, -vertical_spacing)
     
     node_colors = []
     node_shapes = []
@@ -156,7 +157,7 @@ def extended_uluru_exercise():
         "Arrernte Language Specialist",
         "Pitjantjatjara Language Specialist",
         "Knowledge Base Lookup",
-        # TODO: Add your new nodes here
+        "Multimodal Media Tool"
     ]
     
     edges = [
@@ -170,7 +171,12 @@ def extended_uluru_exercise():
         ("Arrernte Language Specialist", "Language Identification"),
         ("Pitjantjatjara Language Specialist", "Language Identification"),
         ("Language Identification", "Visitor Input"),
-        # TODO: Add your new edges here
+        ("Multimodal Media Tool", "Pitjantjatjara Language Specialist"),
+        ("Pitjantjatjara Language Specialist", "Multimodal Media Tool"),
+        ("Multimodal Media Tool", "Arrernte Language Specialist"),
+        ("Arrernte Language Specialist", "Multimodal Media Tool"),
+        ("Multimodal Media Tool", "Knowledge Base Lookup"),
+        ("Knowledge Base Lookup", "Multimodal Media Tool")
     ]
     
     node_types = {
@@ -179,11 +185,11 @@ def extended_uluru_exercise():
         "Arrernte Language Specialist": "agent",
         "Pitjantjatjara Language Specialist": "agent",
         "Knowledge Base Lookup": "tool",
-        # TODO: Add types for your new nodes here
+        "Multimodal Media Tool": "tool"
     }
 
     edge_labels = {
-        ("Language Identification", "Visitor Input"): "Formatted Response",
+        ("Language Identification", "Visitor Input"): "Formatted Response"
         # TODO: Add new edge labels here
     }
 
