@@ -599,15 +599,82 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 ########################
 
 
-# Set up and load your env parameters and instantiate your model.
-dotenv.load_dotenv()
-openai_api_key = os.getenv('UDACITY_OPENAI_API_KEY')
+# Set up helper functions for agent creation.
 
-model = OpenAIServerModel(
-    model_id='gpt-4o-mini',
-    api_base='https://openai.vocareum.com/v1',
-    api_key=openai_api_key,
-)
+def initialize_agent_system() -> CodeAgent:
+    """Create and return the orchestration agent with its sub-agents and tools."""
+    dotenv.load_dotenv()
+    openai_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("UDACITY_OPENAI_API_KEY")
+    if not openai_api_key:
+        raise RuntimeError(
+            "OpenAI API key not found. Set OPENAI_API_KEY or UDACITY_OPENAI_API_KEY in your environment or .env file."
+        )
+
+    model = OpenAIServerModel(
+        model_id="gpt-4o-mini",
+        api_base="https://openai.vocareum.com/v1",
+        api_key=openai_api_key,
+    )
+
+    # Sub-agents
+    sales_agent = CodeAgent(
+        tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
+        model=model,
+        name="Sales Agent",
+        description="Handles sales transactions and financial reporting."
+    )
+
+    inventory_agent = CodeAgent(
+        tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
+        model=model,
+        name="Inventory Management Agent",
+        description="Manages inventory levels, restocking, and supplier deliveries."
+    )
+
+    quote_agent = CodeAgent(
+        tools=[QuoteHistoryTool(), FinancialReportTool(), CashBalanceTool(), InventoryStatusTool()],
+        model=model,
+        name="Quote Agent",
+        description="Generates quotes based on historical data and current inventory."
+    )
+
+    # Tools for calling sub-agents
+    class CallSalesAgentTool(Tool):
+        name = "call_sales_agent"
+        description = "Delegates a task to the Sales Agent for handling sales and financial matters."
+        inputs = {"task": {"type": "string", "description": "The task description to pass to the Sales Agent."}}
+        output_type = "string"
+
+        def forward(self, task: str) -> str:
+            return sales_agent.run(task)
+
+    class CallInventoryAgentTool(Tool):
+        name = "call_inventory_agent"
+        description = "Delegates a task to the Inventory Management Agent for inventory and restocking."
+        inputs = {"task": {"type": "string", "description": "The task description to pass to the Inventory Agent."}}
+        output_type = "string"
+
+        def forward(self, task: str) -> str:
+            return inventory_agent.run(task)
+
+    class CallQuoteAgentTool(Tool):
+        name = "call_quote_agent"
+        description = "Delegates a task to the Quote Agent for generating quotes."
+        inputs = {"task": {"type": "string", "description": "The task description to pass to the Quote Agent."}}
+        output_type = "string"
+
+        def forward(self, task: str) -> str:
+            return quote_agent.run(task)
+
+    orchestration_agent = CodeAgent(
+        tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
+        model=model,
+        name="Orchestration Agent",
+        description="Coordinates between sales, inventory, and quoting agents to fulfill requests."
+    )
+
+    return orchestration_agent
+
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
@@ -700,70 +767,6 @@ class QuoteHistoryTool(Tool):
         return search_quote_history(search_terms, limit)
 
 
-# Agent Setup
-
-# Sub-agents
-
-sales_agent = CodeAgent(
-    tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
-    model=model,
-    name="Sales Agent",
-    description="Handles sales transactions and financial reporting."
-)
-
-inventory_agent = CodeAgent(
-    tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
-    model=model,
-    name="Inventory Management Agent",
-    description="Manages inventory levels, restocking, and supplier deliveries."
-)
-
-quote_agent = CodeAgent(
-    tools=[QuoteHistoryTool(), FinancialReportTool(), CashBalanceTool(), InventoryStatusTool()],
-    model=model,
-    name="Quote Agent",
-    description="Generates quotes based on historical data and current inventory."
-)
-
-# Tools for calling sub-agents
-
-class CallSalesAgentTool(Tool):
-    name = "call_sales_agent"
-    description = "Delegates a task to the Sales Agent for handling sales and financial matters."
-    inputs = {"task": {"type": "string", "description": "The task description to pass to the Sales Agent."}}
-    output_type = "string"
-
-    def forward(self, task: str) -> str:
-        return sales_agent.run(task)
-
-class CallInventoryAgentTool(Tool):
-    name = "call_inventory_agent"
-    description = "Delegates a task to the Inventory Management Agent for inventory and restocking."
-    inputs = {"task": {"type": "string", "description": "The task description to pass to the Inventory Agent."}}
-    output_type = "string"
-
-    def forward(self, task: str) -> str:
-        return inventory_agent.run(task)
-
-class CallQuoteAgentTool(Tool):
-    name = "call_quote_agent"
-    description = "Delegates a task to the Quote Agent for generating quotes."
-    inputs = {"task": {"type": "string", "description": "The task description to pass to the Quote Agent."}}
-    output_type = "string"
-
-    def forward(self, task: str) -> str:
-        return quote_agent.run(task)
-
-# Orchestration Agent
-
-orchestration_agent = CodeAgent(
-    tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
-    model=model,
-    name="Orchestration Agent",
-    description="Coordinates between sales, inventory, and quoting agents to fulfill requests."
-)
-
-
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
 def run_test_scenarios():
@@ -795,6 +798,7 @@ def run_test_scenarios():
     ############
     ############
 
+    orchestration_agent = initialize_agent_system()
     results = []
     for idx, row in quote_requests_sample.iterrows():
         request_date = row["request_date"].strftime("%Y-%m-%d")
