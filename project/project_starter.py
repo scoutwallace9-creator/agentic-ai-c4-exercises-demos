@@ -4,10 +4,12 @@ import os
 import time
 import dotenv
 import ast
+from smolagents.models import OpenAIServerModel
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
 from typing import Dict, List, Union
 from sqlalchemy import create_engine, Engine
+from smolagents import Tool, CodeAgent
 
 # Create an SQLite database
 db_engine = create_engine("sqlite:///munder_difflin.db")
@@ -71,6 +73,7 @@ paper_supplies = [
 
 # Given below are some utility functions you can use to implement your multi-agent system
 
+# This function generates a random inventory for a subset of the paper supplies, with realistic stock levels and minimum stock thresholds.
 def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed: int = 137) -> pd.DataFrame:
     """
     Generate inventory for exactly a specified percentage of items from the full paper supply list.
@@ -126,9 +129,10 @@ def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed:
     # Return inventory as a pandas DataFrame
     return pd.DataFrame(inventory)
 
+# This function initializes the database with the required tables and seed data for transactions, quote requests, quotes, and inventory.
 def init_database(db_engine: Engine, seed: int = 137) -> Engine:    
     """
-    Set up the Munder Difflin database with all required tables and initial records.
+    Set up the Beaver's Choice database with all required tables and initial records.
 
     This function performs the following tasks:
     - Creates the 'transactions' table for logging stock orders and sales
@@ -239,6 +243,7 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         print(f"Error initializing database: {e}")
         raise
 
+# This function records a transaction of type 'stock_orders' or 'sales' with a specified item name, quantity, total price, and transaction date into the 'transactions' table of the database.
 def create_transaction(
     item_name: str,
     transaction_type: str,
@@ -292,6 +297,7 @@ def create_transaction(
         print(f"Error creating transaction: {e}")
         raise
 
+# This function retrieves a snapshot of available inventory as of a specific date, calculating net stock levels by summing stock orders and subtracting sales, and returns only items with positive stock.
 def get_all_inventory(as_of_date: str) -> Dict[str, int]:
     """
     Retrieve a snapshot of available inventory as of a specific date.
@@ -329,6 +335,7 @@ def get_all_inventory(as_of_date: str) -> Dict[str, int]:
     # Convert the result into a dictionary {item_name: stock}
     return dict(zip(result["item_name"], result["stock"]))
 
+# This function retrieves the stock level of a specific item as of a given date by calculating the net stock from transactions.
 def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.DataFrame:
     """
     Retrieve the stock level of a specific item as of a given date.
@@ -368,6 +375,7 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
         params={"item_name": item_name, "as_of_date": as_of_date},
     )
 
+# This function estimates the supplier delivery date based on the requested order quantity and a starting date, applying a tiered lead time structure.
 def get_supplier_delivery_date(input_date_str: str, quantity: int) -> str:
     """
     Estimate the supplier delivery date based on the requested order quantity and a starting date.
@@ -412,6 +420,7 @@ def get_supplier_delivery_date(input_date_str: str, quantity: int) -> str:
     # Return formatted delivery date
     return delivery_date_dt.strftime("%Y-%m-%d")
 
+# This function calculates the current cash balance as of a specified date by summing sales revenue and subtracting stock purchase costs from the transactions table.
 def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
     """
     Calculate the current cash balance as of a specified date.
@@ -449,7 +458,7 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
         print(f"Error getting cash balance: {e}")
         return 0.0
 
-
+# This function generates a complete financial report for the company as of a specific date, including cash balance, inventory valuation, combined asset total, itemized inventory breakdown, and top 5 best-selling products.
 def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
     """
     Generate a complete financial report for the company as of a specific date.
@@ -520,7 +529,7 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
         "top_selling_products": top_selling_products,
     }
 
-
+# This function retrieves a list of historical quotes that match any of the provided search terms, searching both customer requests and quote explanations, and returns results sorted by most recent order date.
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     """
     Retrieve a list of historical quotes that match any of the provided search terms.
@@ -580,6 +589,7 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
         result = conn.execute(text(query), params)
         return [dict(row._mapping) for row in result]
 
+
 ########################
 ########################
 ########################
@@ -590,22 +600,168 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 
 
 # Set up and load your env parameters and instantiate your model.
+dotenv.load_dotenv()
+openai_api_key = os.getenv('UDACITY_OPENAI_API_KEY')
 
+model = OpenAIServerModel(
+    model_id='gpt-4o-mini',
+    api_base='https://openai.vocareum.com/v1',
+    api_key=openai_api_key,
+)
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
 
+########################
+# TOOL DEFINITIONS
+########################
+
 # Tools for inventory agent
+class InventoryStatusTool(Tool):
+    name = "get_inventory_status"
+    description = "Retrieves the current inventory levels for all items as of a specific date."
+    inputs = {"as_of_date": {"type": "string", "description": "The date in ISO format (YYYY-MM-DD) to get inventory as of."}}
+    output_type = "object"
 
+    def forward(self, as_of_date: str) -> Dict[str, int]:
+        return get_all_inventory(as_of_date)
 
-# Tools for quoting agent
+class StockLevelTool(Tool):
+    name = "get_stock_level"
+    description = "Gets the current stock level for a specific item as of a given date."
+    inputs = {
+        "item_name": {"type": "string", "description": "The name of the item to check."},
+        "as_of_date": {"type": "string", "description": "The date in ISO format to check stock as of."}
+    }
+    output_type = "object"
 
+    def forward(self, item_name: str, as_of_date: str) -> Dict:
+        df = get_stock_level(item_name, as_of_date)
+        return df.to_dict(orient="records")[0] if not df.empty else {"item_name": item_name, "current_stock": 0}
 
 # Tools for ordering agent
+class CreateTransactionTool(Tool):
+    name = "create_transaction"
+    description = "Records a new transaction (stock order or sale) in the database."
+    inputs = {
+        "item_name": {"type": "string", "description": "The name of the item."},
+        "transaction_type": {"type": "string", "description": "Either 'stock_orders' or 'sales'."},
+        "quantity": {"type": "integer", "description": "Number of units."},
+        "price": {"type": "number", "description": "Total price of the transaction."},
+        "date": {"type": "string", "description": "Transaction date in ISO format."}
+    }
+    output_type = "integer"
+
+    def forward(self, item_name: str, transaction_type: str, quantity: int, price: float, date: str) -> int:
+        return create_transaction(item_name, transaction_type, quantity, price, date)
+
+class SupplierDeliveryTool(Tool):
+    name = "get_supplier_delivery_date"
+    description = "Estimates the delivery date from supplier based on order quantity."
+    inputs = {
+        "input_date_str": {"type": "string", "description": "Starting date in ISO format."},
+        "quantity": {"type": "integer", "description": "Order quantity."}
+    }
+    output_type = "string"
+
+    def forward(self, input_date_str: str, quantity: int) -> str:
+        return get_supplier_delivery_date(input_date_str, quantity)
+
+# Tools for quoting agent
+class CashBalanceTool(Tool):
+    name = "get_cash_balance"
+    description = "Calculates the current cash balance as of a specific date."
+    inputs = {"as_of_date": {"type": "string", "description": "The date in ISO format."}}
+    output_type = "number"
+
+    def forward(self, as_of_date: str) -> float:
+        return get_cash_balance(as_of_date)
+
+class FinancialReportTool(Tool):
+    name = "generate_financial_report"
+    description = "Generates a complete financial report including cash, inventory, and sales data."
+    inputs = {"as_of_date": {"type": "string", "description": "The date in ISO format for the report."}}
+    output_type = "object"
+
+    def forward(self, as_of_date: str) -> Dict:
+        return generate_financial_report(as_of_date)
+
+class QuoteHistoryTool(Tool):
+    name = "search_quote_history"
+    description = "Searches historical quotes based on search terms."
+    inputs = {
+        "search_terms": {"type": "array", "description": "List of search terms."},
+        "limit": {"type": "integer", "description": "Maximum number of results.", "default": 5}
+    }
+    output_type = "array"
+
+    def forward(self, search_terms: List[str], limit: int = 5) -> List[Dict]:
+        return search_quote_history(search_terms, limit)
 
 
-# Set up your agents and create an orchestration agent that will manage them.
+# Agent Setup
+
+# Sub-agents
+
+sales_agent = CodeAgent(
+    tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
+    model=model,
+    name="Sales Agent",
+    description="Handles sales transactions and financial reporting."
+)
+
+inventory_agent = CodeAgent(
+    tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
+    model=model,
+    name="Inventory Management Agent",
+    description="Manages inventory levels, restocking, and supplier deliveries."
+)
+
+quote_agent = CodeAgent(
+    tools=[QuoteHistoryTool(), FinancialReportTool(), CashBalanceTool(), InventoryStatusTool()],
+    model=model,
+    name="Quote Agent",
+    description="Generates quotes based on historical data and current inventory."
+)
+
+# Tools for calling sub-agents
+
+class CallSalesAgentTool(Tool):
+    name = "call_sales_agent"
+    description = "Delegates a task to the Sales Agent for handling sales and financial matters."
+    inputs = {"task": {"type": "string", "description": "The task description to pass to the Sales Agent."}}
+    output_type = "string"
+
+    def forward(self, task: str) -> str:
+        return sales_agent.run(task)
+
+class CallInventoryAgentTool(Tool):
+    name = "call_inventory_agent"
+    description = "Delegates a task to the Inventory Management Agent for inventory and restocking."
+    inputs = {"task": {"type": "string", "description": "The task description to pass to the Inventory Agent."}}
+    output_type = "string"
+
+    def forward(self, task: str) -> str:
+        return inventory_agent.run(task)
+
+class CallQuoteAgentTool(Tool):
+    name = "call_quote_agent"
+    description = "Delegates a task to the Quote Agent for generating quotes."
+    inputs = {"task": {"type": "string", "description": "The task description to pass to the Quote Agent."}}
+    output_type = "string"
+
+    def forward(self, task: str) -> str:
+        return quote_agent.run(task)
+
+# Orchestration Agent
+
+orchestration_agent = CodeAgent(
+    tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
+    model=model,
+    name="Orchestration Agent",
+    description="Coordinates between sales, inventory, and quoting agents to fulfill requests."
+)
 
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
@@ -652,15 +808,9 @@ def run_test_scenarios():
         # Process request
         request_with_date = f"{row['request']} (Date of request: {request_date})"
 
-        ############
-        ############
-        ############
-        # USE YOUR MULTI AGENT SYSTEM TO HANDLE THE REQUEST
-        ############
-        ############
-        ############
+        response = orchestration_agent.run(request_with_date)
 
-        # response = call_your_multi_agent_system(request_with_date)
+        # Update state
 
         # Update state
         report = generate_financial_report(request_date)
