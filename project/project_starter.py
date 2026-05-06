@@ -11,6 +11,9 @@ from typing import Dict, List, Union
 from sqlalchemy import create_engine, Engine
 from smolagents import Tool, CodeAgent
 
+# Base paths for local data files
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Create an SQLite database
 db_engine = create_engine("sqlite:///munder_difflin.db")
 
@@ -172,14 +175,14 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         # ----------------------------
         # 2. Load and initialize 'quote_requests' table
         # ----------------------------
-        quote_requests_df = pd.read_csv("quote_requests.csv")
+        quote_requests_df = pd.read_csv(os.path.join(SCRIPT_DIR, "quote_requests.csv"))
         quote_requests_df["id"] = range(1, len(quote_requests_df) + 1)
         quote_requests_df.to_sql("quote_requests", db_engine, if_exists="replace", index=False)
 
         # ----------------------------
         # 3. Load and transform 'quotes' table
         # ----------------------------
-        quotes_df = pd.read_csv("quotes.csv")
+        quotes_df = pd.read_csv(os.path.join(SCRIPT_DIR, "quotes.csv"))
         quotes_df["request_id"] = range(1, len(quotes_df) + 1)
         quotes_df["order_date"] = initial_date
 
@@ -620,21 +623,21 @@ def initialize_agent_system() -> CodeAgent:
     sales_agent = CodeAgent(
         tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
         model=model,
-        name="Sales Agent",
+        name="SalesAgent",
         description="Handles sales transactions and financial reporting."
     )
 
     inventory_agent = CodeAgent(
         tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
         model=model,
-        name="Inventory Management Agent",
+        name="InventoryManagementAgent",
         description="Manages inventory levels, restocking, and supplier deliveries."
     )
 
     quote_agent = CodeAgent(
         tools=[QuoteHistoryTool(), FinancialReportTool(), CashBalanceTool(), InventoryStatusTool()],
         model=model,
-        name="Quote Agent",
+        name="QuoteAgent",
         description="Generates quotes based on historical data and current inventory."
     )
 
@@ -669,7 +672,7 @@ def initialize_agent_system() -> CodeAgent:
     orchestration_agent = CodeAgent(
         tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
         model=model,
-        name="Orchestration Agent",
+        name="OrchestrationAgent",
         description="Coordinates between sales, inventory, and quoting agents to fulfill requests."
     )
 
@@ -759,7 +762,7 @@ class QuoteHistoryTool(Tool):
     description = "Searches historical quotes based on search terms."
     inputs = {
         "search_terms": {"type": "array", "description": "List of search terms."},
-        "limit": {"type": "integer", "description": "Maximum number of results.", "default": 5}
+        "limit": {"type": "integer", "description": "Maximum number of results.", "default": 5, "nullable": True}
     }
     output_type = "array"
 
@@ -772,9 +775,9 @@ class QuoteHistoryTool(Tool):
 def run_test_scenarios():
     
     print("Initializing Database...")
-    init_database()
+    init_database(db_engine)
     try:
-        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
+        quote_requests_sample = pd.read_csv(os.path.join(SCRIPT_DIR, "quote_requests_sample.csv"))
         quote_requests_sample["request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
         )
