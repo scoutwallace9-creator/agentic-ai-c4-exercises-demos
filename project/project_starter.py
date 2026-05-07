@@ -713,7 +713,7 @@ class StockLevelTool(Tool):
 # Tools for ordering agent
 class CreateTransactionTool(Tool):
     name = "create_transaction"
-    description = "Records a new transaction (stock order or sale) in the database."
+    description = "Records a new transaction (stock order or sale) in the database, subject to budget, stock, lead time, and policy constraints."
     inputs = {
         "item_name": {"type": "string", "description": "The name of the item."},
         "transaction_type": {"type": "string", "description": "Either 'stock_orders' or 'sales'."},
@@ -721,10 +721,53 @@ class CreateTransactionTool(Tool):
         "price": {"type": "number", "description": "Total price of the transaction."},
         "date": {"type": "string", "description": "Transaction date in ISO format."}
     }
-    output_type = "integer"
+    output_type = "object"
 
-    def forward(self, item_name: str, transaction_type: str, quantity: int, price: float, date: str) -> int:
-        return create_transaction(item_name, transaction_type, quantity, price, date)
+    def forward(self, item_name: str, transaction_type: str, quantity: int, price: float, date: str) -> Dict:
+        # Policy checks: basic validations
+        if quantity <= 0:
+            return {"success": False, "message": "Transaction cannot be created: quantity must be positive."}
+        if price < 0:
+            return {"success": False, "message": "Transaction cannot be created: price cannot be negative."}
+        if transaction_type not in {"stock_orders", "sales"}:
+            return {"success": False, "message": "Transaction cannot be created: invalid transaction type."}
+        
+        # Convert date and check lead time (not in the past)
+        try:
+            transaction_date = datetime.fromisoformat(date.split("T")[0])
+            if transaction_date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+                return {"success": False, "message": "Transaction cannot be created: transaction date cannot be in the past."}
+        except ValueError:
+            return {"success": False, "message": "Transaction cannot be created: invalid date format."}
+        
+        if transaction_type == "sales":
+            # Stock check
+            stock_df = get_stock_level(item_name, date)
+            if stock_df.empty or stock_df["current_stock"].iloc[0] < quantity:
+                available = stock_df["current_stock"].iloc[0] if not stock_df.empty else 0
+                return {"success": False, "message": f"Order cannot be fulfilled: insufficient stock for {item_name}. Available quantity: {available}."}
+        
+        elif transaction_type == "stock_orders":
+            # Budget check
+            current_cash = get_cash_balance(date)
+            if current_cash < price:
+                return {"success": False, "message": f"Order cannot be fulfilled: insufficient budget. Available cash: ${current_cash:.2f}."}
+            
+            # Lead time check: estimate delivery and ensure transaction date allows for it
+            estimated_delivery = get_supplier_delivery_date(date, quantity)
+            try:
+                delivery_dt = datetime.fromisoformat(estimated_delivery)
+                if transaction_date >= delivery_dt:
+                    return {"success": False, "message": f"Order cannot be fulfilled: lead time constraint. Estimated delivery date: {estimated_delivery}."}
+            except ValueError:
+                pass  # If parsing fails, skip this check
+        
+        # If all checks pass, create the transaction
+        try:
+            transaction_id = create_transaction(item_name, transaction_type, quantity, price, date)
+            return {"success": True, "transaction_id": transaction_id}
+        except Exception as e:
+            return {"success": False, "message": "Transaction cannot be created: an internal error occurred. Please try again later."}
 
 class SupplierDeliveryTool(Tool):
     name = "get_supplier_delivery_date"
