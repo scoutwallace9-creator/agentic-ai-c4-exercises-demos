@@ -174,16 +174,6 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
                 )
                 """
             ))
-            conn.execute(text("DROP TABLE IF EXISTS cash_balances"))
-            conn.execute(text(
-                """
-                CREATE TABLE cash_balances (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    balance REAL NOT NULL,
-                    recorded_at TEXT NOT NULL
-                )
-                """
-            ))
 
         # Set a consistent starting date as a date-only string
         initial_date = datetime(2025, 1, 1).strftime("%Y-%m-%d")
@@ -253,15 +243,6 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
 
         # Commit transactions to database
         pd.DataFrame(initial_transactions).to_sql("transactions", db_engine, if_exists="append", index=False)
-
-        # Save initial available cash in a dedicated table
-        with db_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO cash_balances (balance, recorded_at) VALUES (:balance, :recorded_at)"
-                ),
-                {"balance": 50000.0, "recorded_at": initial_date},
-            )
 
         # Save the inventory reference table
         inventory_df.to_sql("inventory", db_engine, if_exists="replace", index=False)
@@ -349,10 +330,8 @@ def create_transaction(
 
             if transaction_type == "sales":
                 update_inventory_stock(item_name, -quantity, conn)
-                adjust_cash_balance(price, date_str, conn)
             elif transaction_type == "stock_orders":
                 update_inventory_stock(item_name, quantity, conn)
-                adjust_cash_balance(-price, date_str, conn)
 
         # Confirm the transaction exists in the database before returning success.
         if not transaction_exists(transaction_id):
@@ -410,30 +389,6 @@ def update_inventory_stock(item_name: str, delta_units: int, conn) -> bool:
             },
         )
     return True
-
-
-def adjust_cash_balance(amount_delta: float, date: Union[str, datetime], conn) -> float:
-    """Adjust the cash balance by a delta amount and return the new balance."""
-    date_str = date.strftime("%Y-%m-%d") if isinstance(date, datetime) else date.split("T")[0]
-    current_balance = conn.execute(
-        text(
-            "SELECT balance FROM cash_balances "
-            "WHERE recorded_at <= :date_str "
-            "ORDER BY recorded_at DESC, id DESC LIMIT 1"
-        ),
-        {"date_str": date_str},
-    ).scalar_one_or_none()
-    if current_balance is None:
-        current_balance = 0.0
-
-    new_balance = float(current_balance) + float(amount_delta)
-    conn.execute(
-        text(
-            "INSERT INTO cash_balances (balance, recorded_at) VALUES (:balance, :recorded_at)"
-        ),
-        {"balance": new_balance, "recorded_at": date_str},
-    )
-    return new_balance
 
 
 def resolve_item_name(item_name: str) -> str:
@@ -627,22 +582,7 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
         else:
             as_of_date = as_of_date.split("T")[0]
 
-        try:
-            with db_engine.connect() as conn:
-                result = conn.execute(
-                    text(
-                        "SELECT balance FROM cash_balances "
-                        "WHERE recorded_at <= :as_of_date "
-                        "ORDER BY recorded_at DESC, id DESC LIMIT 1"
-                    ),
-                    {"as_of_date": as_of_date},
-                ).scalar_one_or_none()
-                if result is not None:
-                    return float(result)
-        except Exception:
-            pass
-
-        # Query all transactions on or before the specified date as a fallback
+        # Query all transactions on or before the specified date
         transactions = pd.read_sql(
             "SELECT * FROM transactions WHERE transaction_date <= :as_of_date",
             db_engine,
