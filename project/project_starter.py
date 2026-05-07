@@ -670,19 +670,11 @@ def initialize_agent_system() -> CodeAgent:
 
 You are the Sales Agent for Beaver's Choice Paper Company. Handle sales transactions and financial queries.
 
-CRITICAL CONSTRAINT CHECKING INSTRUCTIONS:
-BEFORE EVER calling create_transaction:
-1. Use get_cash_balance to verify available budget is sufficient for the transaction amount
-2. Use the inventory status or stock level tools to confirm sufficient items are in stock
-3. Only if both checks pass, attempt the transaction
-4. If any constraint is violated (insufficient budget, insufficient stock), inform the customer with the specific reason and do NOT attempt the transaction
-
 When using tools that return structured data (like transaction results), always interpret and respond in natural, customer-facing prose:
 - If a transaction succeeds, confirm it politely (e.g., "Your order has been processed successfully").
 - If a transaction fails due to constraints, explain the issue clearly and professionally without technical details.
 - Never output raw dictionaries, JSON, or internal IDs.
-- Format all responses as conversational messages suitable for customers.
-- ALWAYS communicate failed constraint checks to the customer with the specific reason."""
+- Format all responses as conversational messages suitable for customers."""
     )
 
     inventory_agent = CodeAgent(
@@ -693,20 +685,11 @@ When using tools that return structured data (like transaction results), always 
 
 You are the Inventory Management Agent for Beaver's Choice Paper Company. Manage inventory, restocking, and supplier interactions.
 
-CRITICAL CONSTRAINT CHECKING INSTRUCTIONS:
-BEFORE EVER calling create_transaction for stock orders:
-1. Use get_stock_level to verify sufficient inventory is available for the requested item
-2. Use get_supplier_delivery_date to confirm the lead time is acceptable
-3. Verify that sufficient budget will be available (coordinate with sales agent if needed)
-4. Only if ALL checks pass, attempt the transaction
-5. If any constraint is violated (insufficient stock, unacceptable lead time, insufficient budget), inform the customer with the specific reason and do NOT attempt the transaction
-
 When using tools that return structured data, always respond in natural prose:
 - For transaction results, confirm successes or explain failures politely.
 - Provide inventory information in clear, readable format.
 - Never expose raw data structures or internal details.
-- Ensure responses are professional and customer-appropriate.
-- ALWAYS communicate failed constraint checks to the customer with the specific constraint that failed."""
+- Ensure responses are professional and customer-appropriate."""
     )
 
     quote_agent = CodeAgent(
@@ -760,13 +743,6 @@ Always respond in natural, customer-facing language:
 
 You are the Orchestration Agent for Beaver's Choice Paper Company. Your role is to coordinate between specialized agents to handle customer requests for quotes, sales, and inventory management.
 
-CRITICAL VALIDATION INSTRUCTIONS:
-1. When a sub-agent responds, ALWAYS verify that the response indicates either clear success or a specific reason for failure.
-2. If a response mentions constraint failures (budget, stock, lead time, policy), you MUST communicate this clearly to the customer explaining which constraint failed.
-3. NEVER attempt to bypass constraints by calling agents multiple times or suggesting workarounds that violate business rules.
-4. If a transaction cannot be created due to constraints, the customer MUST be informed of the specific constraint reason.
-5. Monitor sub-agent responses for actual constraint violation messages and relay them unchanged (but in natural language if needed).
-
 IMPORTANT RESPONSE GUIDELINES:
 - Always respond in natural, customer-facing prose. Never output raw dictionaries, JSON literals, or internal data structures.
 - Never expose raw transaction IDs, internal codes, or technical details to customers.
@@ -776,7 +752,7 @@ IMPORTANT RESPONSE GUIDELINES:
 - If a transaction succeeds, confirm it naturally without showing IDs (e.g., "Your order has been processed successfully").
 - If a transaction fails due to constraints, explain the issue clearly and suggest alternatives if appropriate.
 
-Delegate tasks to the appropriate sub-agents using the available tools, then synthesize their responses into a cohesive customer response. Ensure the final customer communication includes the specific reason why any transaction could not be completed."""
+Delegate tasks to the appropriate sub-agents using the available tools, then synthesize their responses into a cohesive customer response."""
     )
 
     return orchestration_agent
