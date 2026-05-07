@@ -188,12 +188,13 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
 
         # Unpack metadata fields (job_type, order_size, event_type) if present
         if "request_metadata" in quotes_df.columns:
-            quotes_df["request_metadata"] = quotes_df["request_metadata"].apply(
+            parsed_metadata = quotes_df["request_metadata"].apply(
                 lambda x: ast.literal_eval(x) if isinstance(x, str) else x
             )
-            quotes_df["job_type"] = quotes_df["request_metadata"].apply(lambda x: x.get("job_type", ""))
-            quotes_df["order_size"] = quotes_df["request_metadata"].apply(lambda x: x.get("order_size", ""))
-            quotes_df["event_type"] = quotes_df["request_metadata"].apply(lambda x: x.get("event_type", ""))
+            quotes_df["request_metadata"] = parsed_metadata
+            quotes_df["job_type"] = parsed_metadata.apply(lambda x: x.get("job_type", ""))
+            quotes_df["order_size"] = parsed_metadata.apply(lambda x: x.get("order_size", ""))
+            quotes_df["event_type"] = parsed_metadata.apply(lambda x: x.get("event_type", ""))
 
         # Retain only relevant columns
         quotes_df = quotes_df[[
@@ -624,8 +625,9 @@ def initialize_agent_system() -> CodeAgent:
         tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
         model=model,
         name="SalesAgent",
-        description="Handles sales transactions and financial reporting.",
-        prompt="""You are the Sales Agent for Beaver's Choice Paper Company. Handle sales transactions and financial queries.
+        description="""Handles sales transactions and financial reporting.
+
+You are the Sales Agent for Beaver's Choice Paper Company. Handle sales transactions and financial queries.
 
 When using tools that return structured data (like transaction results), always interpret and respond in natural, customer-facing prose:
 - If a transaction succeeds, confirm it politely (e.g., "Your order has been processed successfully").
@@ -638,8 +640,9 @@ When using tools that return structured data (like transaction results), always 
         tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
         model=model,
         name="InventoryManagementAgent",
-        description="Manages inventory levels, restocking, and supplier deliveries.",
-        prompt="""You are the Inventory Management Agent for Beaver's Choice Paper Company. Manage inventory, restocking, and supplier interactions.
+        description="""Manages inventory levels, restocking, and supplier deliveries.
+
+You are the Inventory Management Agent for Beaver's Choice Paper Company. Manage inventory, restocking, and supplier interactions.
 
 When using tools that return structured data, always respond in natural prose:
 - For transaction results, confirm successes or explain failures politely.
@@ -652,8 +655,9 @@ When using tools that return structured data, always respond in natural prose:
         tools=[QuoteHistoryTool(), FinancialReportTool(), CashBalanceTool(), InventoryStatusTool()],
         model=model,
         name="QuoteAgent",
-        description="Generates quotes based on historical data and current inventory.",
-        prompt="""You are the Quote Agent for Beaver's Choice Paper Company. Generate quotes and provide pricing information.
+        description="""Generates quotes based on historical data and current inventory.
+
+You are the Quote Agent for Beaver's Choice Paper Company. Generate quotes and provide pricing information.
 
 Always respond in natural, customer-facing language:
 - Present quotes clearly with itemized pricing.
@@ -694,8 +698,9 @@ Always respond in natural, customer-facing language:
         tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
         model=model,
         name="OrchestrationAgent",
-        description="Coordinates between sales, inventory, and quoting agents to fulfill requests.",
-        prompt="""You are the Orchestration Agent for Beaver's Choice Paper Company. Your role is to coordinate between specialized agents to handle customer requests for quotes, sales, and inventory management.
+        description="""Coordinates between sales, inventory, and quoting agents to fulfill requests.
+
+You are the Orchestration Agent for Beaver's Choice Paper Company. Your role is to coordinate between specialized agents to handle customer requests for quotes, sales, and inventory management.
 
 IMPORTANT RESPONSE GUIDELINES:
 - Always respond in natural, customer-facing prose. Never output raw dictionaries, JSON literals, or internal data structures.
@@ -759,39 +764,66 @@ class CreateTransactionTool(Tool):
     def forward(self, item_name: str, transaction_type: str, quantity: int, price: float, date: str) -> Dict:
         # Policy checks: basic validations
         if quantity <= 0:
-            return {"success": False, "message": "Transaction cannot be created: quantity must be positive."}
+            return {
+                "success": False,
+                "constraint": "policy",
+                "message": "We cannot process this order. The quantity must be a positive number. Please verify your request and try again."
+            }
         if price < 0:
-            return {"success": False, "message": "Transaction cannot be created: price cannot be negative."}
+            return {
+                "success": False,
+                "constraint": "policy",
+                "message": "We cannot process this order. The price cannot be negative. Please verify your pricing and try again."
+            }
         if transaction_type not in {"stock_orders", "sales"}:
-            return {"success": False, "message": "Transaction cannot be created: invalid transaction type."}
+            return {
+                "success": False,
+                "constraint": "policy",
+                "message": "We cannot process this order. The transaction type is invalid. Please contact our support team for assistance."
+            }
         
-        # Convert date and check lead time (not in the past)
+        # Convert date and check format
         try:
             transaction_date = datetime.fromisoformat(date.split("T")[0])
-            if transaction_date < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
-                return {"success": False, "message": "Transaction cannot be created: transaction date cannot be in the past."}
         except ValueError:
-            return {"success": False, "message": "Transaction cannot be created: invalid date format."}
+            return {
+                "success": False,
+                "constraint": "policy",
+                "message": "We cannot process this order. The date format is invalid. Please use the ISO 8601 format (YYYY-MM-DD) and try again."
+            }
         
         if transaction_type == "sales":
-            # Stock check
+            # Stock constraint check
             stock_df = get_stock_level(item_name, date)
-            if stock_df.empty or stock_df["current_stock"].iloc[0] < quantity:
-                available = stock_df["current_stock"].iloc[0] if not stock_df.empty else 0
-                return {"success": False, "message": f"Order cannot be fulfilled: insufficient stock for {item_name}. Available quantity: {available}."}
+            current_stock = stock_df["current_stock"].iloc[0] if not stock_df.empty else 0
+            
+            if current_stock < quantity:
+                return {
+                    "success": False,
+                    "constraint": "stock",
+                    "message": f"We apologize, but we cannot fulfill this order due to insufficient inventory. You requested {quantity} units of {item_name}, but we currently have {current_stock} units available in stock. Please reduce your order quantity or contact us to discuss options."
+                }
         
         elif transaction_type == "stock_orders":
-            # Budget check
+            # Budget constraint check
             current_cash = get_cash_balance(date)
             if current_cash < price:
-                return {"success": False, "message": f"Order cannot be fulfilled: insufficient budget. Available cash: ${current_cash:.2f}."}
+                return {
+                    "success": False,
+                    "constraint": "budget",
+                    "message": f"We apologize, but we cannot fulfill this order due to insufficient funds. Your order totals ${price:.2f}, but our available budget is only ${current_cash:.2f}. Please contact our procurement team to discuss alternative payment arrangements or reduce the order size."
+                }
             
-            # Lead time check: estimate delivery and ensure transaction date allows for it
+            # Lead time constraint check
             estimated_delivery = get_supplier_delivery_date(date, quantity)
             try:
                 delivery_dt = datetime.fromisoformat(estimated_delivery)
                 if transaction_date >= delivery_dt:
-                    return {"success": False, "message": f"Order cannot be fulfilled: lead time constraint. Estimated delivery date: {estimated_delivery}."}
+                    return {
+                        "success": False,
+                        "constraint": "lead_time",
+                        "message": f"We apologize, but we cannot fulfill this order within the requested timeframe. Based on the order quantity of {quantity} units, the estimated delivery date is {estimated_delivery}. The transaction date you specified ({date.split('T')[0]}) does not allow sufficient time for delivery. Please extend your delivery window or reduce the order quantity for faster processing."
+                    }
             except ValueError:
                 pass  # If parsing fails, skip this check
         
@@ -800,7 +832,11 @@ class CreateTransactionTool(Tool):
             transaction_id = create_transaction(item_name, transaction_type, quantity, price, date)
             return {"success": True, "transaction_id": transaction_id}
         except Exception as e:
-            return {"success": False, "message": "Transaction cannot be created: an internal error occurred. Please try again later."}
+            return {
+                "success": False,
+                "constraint": "system",
+                "message": "We apologize for the inconvenience. An unexpected error occurred while processing your order. Please try again, or contact our support team if the problem persists."
+            }
 
 class SupplierDeliveryTool(Tool):
     name = "get_supplier_delivery_date"
@@ -854,10 +890,12 @@ def run_test_scenarios():
     init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv(os.path.join(SCRIPT_DIR, "quote_requests_sample.csv"))
-        quote_requests_sample["request_date"] = pd.to_datetime(
-            quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
+        quote_requests_sample = quote_requests_sample.assign(
+            request_date=pd.to_datetime(
+                quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
+            )
         )
-        quote_requests_sample.dropna(subset=["request_date"], inplace=True)
+        quote_requests_sample = quote_requests_sample.dropna(subset=["request_date"])
         quote_requests_sample = quote_requests_sample.sort_values("request_date")
     except Exception as e:
         print(f"FATAL: Error loading test data: {e}")
