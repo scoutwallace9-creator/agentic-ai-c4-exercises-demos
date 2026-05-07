@@ -624,21 +624,42 @@ def initialize_agent_system() -> CodeAgent:
         tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
         model=model,
         name="SalesAgent",
-        description="Handles sales transactions and financial reporting."
+        description="Handles sales transactions and financial reporting.",
+        prompt="""You are the Sales Agent for Beaver's Choice Paper Company. Handle sales transactions and financial queries.
+
+When using tools that return structured data (like transaction results), always interpret and respond in natural, customer-facing prose:
+- If a transaction succeeds, confirm it politely (e.g., "Your order has been processed successfully").
+- If a transaction fails due to constraints, explain the issue clearly and professionally without technical details.
+- Never output raw dictionaries, JSON, or internal IDs.
+- Format all responses as conversational messages suitable for customers."""
     )
 
     inventory_agent = CodeAgent(
         tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
         model=model,
         name="InventoryManagementAgent",
-        description="Manages inventory levels, restocking, and supplier deliveries."
+        description="Manages inventory levels, restocking, and supplier deliveries.",
+        prompt="""You are the Inventory Management Agent for Beaver's Choice Paper Company. Manage inventory, restocking, and supplier interactions.
+
+When using tools that return structured data, always respond in natural prose:
+- For transaction results, confirm successes or explain failures politely.
+- Provide inventory information in clear, readable format.
+- Never expose raw data structures or internal details.
+- Ensure responses are professional and customer-appropriate."""
     )
 
     quote_agent = CodeAgent(
         tools=[QuoteHistoryTool(), FinancialReportTool(), CashBalanceTool(), InventoryStatusTool()],
         model=model,
         name="QuoteAgent",
-        description="Generates quotes based on historical data and current inventory."
+        description="Generates quotes based on historical data and current inventory.",
+        prompt="""You are the Quote Agent for Beaver's Choice Paper Company. Generate quotes and provide pricing information.
+
+Always respond in natural, customer-facing language:
+- Present quotes clearly with itemized pricing.
+- Use coherent dates and professional formatting.
+- Never output raw data structures.
+- Make responses conversational and helpful."""
     )
 
     # Tools for calling sub-agents
@@ -673,7 +694,19 @@ def initialize_agent_system() -> CodeAgent:
         tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
         model=model,
         name="OrchestrationAgent",
-        description="Coordinates between sales, inventory, and quoting agents to fulfill requests."
+        description="Coordinates between sales, inventory, and quoting agents to fulfill requests.",
+        prompt="""You are the Orchestration Agent for Beaver's Choice Paper Company. Your role is to coordinate between specialized agents to handle customer requests for quotes, sales, and inventory management.
+
+IMPORTANT RESPONSE GUIDELINES:
+- Always respond in natural, customer-facing prose. Never output raw dictionaries, JSON literals, or internal data structures.
+- Never expose raw transaction IDs, internal codes, or technical details to customers.
+- Ensure all dates mentioned are coherent and realistic (e.g., delivery dates should be in the future, transaction dates should be current or past).
+- When budget or stock constraints prevent fulfillment, be honest about the limitation but polite and professional.
+- Format responses as complete, conversational messages that a customer would understand.
+- If a transaction succeeds, confirm it naturally without showing IDs (e.g., "Your order has been processed successfully").
+- If a transaction fails due to constraints, explain the issue clearly and suggest alternatives if appropriate.
+
+Delegate tasks to the appropriate sub-agents using the available tools, then synthesize their responses into a cohesive customer response."""
     )
 
     return orchestration_agent
