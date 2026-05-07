@@ -157,20 +157,25 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
     """
     try:
         # ----------------------------
-        # 1. Create an empty 'transactions' table schema
+        # 1. Create an explicit 'transactions' table schema
         # ----------------------------
-        transactions_schema = pd.DataFrame({
-            "id": [],
-            "item_name": [],
-            "transaction_type": [],  # 'stock_orders' or 'sales'
-            "units": [],             # Quantity involved
-            "price": [],             # Total price for the transaction
-            "transaction_date": [],  # ISO-formatted date
-        })
-        transactions_schema.to_sql("transactions", db_engine, if_exists="replace", index=False)
+        with db_engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS transactions"))
+            conn.execute(text(
+                """
+                CREATE TABLE transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_name TEXT,
+                    transaction_type TEXT,
+                    units INTEGER,
+                    price REAL,
+                    transaction_date TEXT
+                )
+                """
+            ))
 
-        # Set a consistent starting date
-        initial_date = datetime(2025, 1, 1).isoformat()
+        # Set a consistent starting date as a date-only string
+        initial_date = datetime(2025, 1, 1).strftime("%Y-%m-%d")
 
         # ----------------------------
         # 2. Load and initialize 'quote_requests' table
@@ -247,6 +252,18 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         print(f"Error initializing database: {e}")
         raise
 
+
+def is_database_initialized(db_engine: Engine) -> bool:
+    """Return True if the database has been initialized with required tables."""
+    try:
+        with db_engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'")
+            ).first()
+            return result is not None
+    except Exception:
+        return False
+
 # This function records a transaction of type 'stock_orders' or 'sales' with a specified item name, quantity, total price, and transaction date into the 'transactions' table of the database.
 def create_transaction(
     item_name: str,
@@ -274,32 +291,77 @@ def create_transaction(
         Exception: For other database or execution errors.
     """
     try:
-        # Convert datetime to ISO string if necessary
-        date_str = date.isoformat() if isinstance(date, datetime) else date
+        # Convert datetime to a date-only string if necessary
+        date_str = date.strftime("%Y-%m-%d") if isinstance(date, datetime) else date.split("T")[0]
 
         # Validate transaction type
         if transaction_type not in {"stock_orders", "sales"}:
             raise ValueError("Transaction type must be 'stock_orders' or 'sales'")
 
-        # Prepare transaction record as a single-row DataFrame
-        transaction = pd.DataFrame([{
-            "item_name": item_name,
-            "transaction_type": transaction_type,
-            "units": quantity,
-            "price": price,
-            "transaction_date": date_str,
-        }])
+        # Insert the record into the database using a direct connection so the insertion persists immediately.
+        with db_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO transactions (item_name, transaction_type, units, price, transaction_date) "
+                    "VALUES (:item_name, :transaction_type, :units, :price, :transaction_date)"
+                ),
+                {
+                    "item_name": item_name,
+                    "transaction_type": transaction_type,
+                    "units": quantity,
+                    "price": price,
+                    "transaction_date": date_str,
+                },
+            )
+            result = conn.execute(text("SELECT last_insert_rowid() as id"))
+            transaction_id = int(result.scalar_one())
 
-        # Insert the record into the database
-        transaction.to_sql("transactions", db_engine, if_exists="append", index=False)
+        # Confirm the transaction exists in the database before returning success.
+        if not transaction_exists(transaction_id):
+            raise RuntimeError("Transaction was not confirmed in the database after insert.")
 
-        # Fetch and return the ID of the inserted row
-        result = pd.read_sql("SELECT last_insert_rowid() as id", db_engine)
-        return int(result.iloc[0]["id"])
+        return transaction_id
 
     except Exception as e:
         print(f"Error creating transaction: {e}")
         raise
+
+
+def transaction_exists(transaction_id: int) -> bool:
+    """Return True if a transaction with the given ID exists in the database."""
+    try:
+        with db_engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT 1 FROM transactions WHERE id = :id"),
+                {"id": transaction_id},
+            ).first()
+            return result is not None
+    except Exception as e:
+        print(f"Error confirming transaction exists: {e}")
+        return False
+
+
+def get_unit_price(item_name: str) -> Union[float, None]:
+    """Return the unit price for a given item from the inventory or fallback reference list."""
+    if not item_name:
+        return None
+
+    try:
+        inventory_price = pd.read_sql(
+            "SELECT unit_price FROM inventory WHERE item_name = :item_name LIMIT 1",
+            db_engine,
+            params={"item_name": item_name},
+        )
+        if not inventory_price.empty:
+            return float(inventory_price.iloc[0]["unit_price"])
+    except Exception as e:
+        print(f"Error looking up unit price in inventory for {item_name}: {e}")
+
+    for supply in paper_supplies:
+        if supply["item_name"] == item_name:
+            return float(supply["unit_price"])
+
+    return None
 
 # This function retrieves a snapshot of available inventory as of a specific date, calculating net stock levels by summing stock orders and subtracting sales, and returns only items with positive stock.
 def get_all_inventory(as_of_date: str) -> Dict[str, int]:
@@ -333,6 +395,11 @@ def get_all_inventory(as_of_date: str) -> Dict[str, int]:
         HAVING stock > 0
     """
 
+    if isinstance(as_of_date, datetime):
+        as_of_date = as_of_date.strftime("%Y-%m-%d")
+    else:
+        as_of_date = as_of_date.split("T")[0]
+
     # Execute the query with the date parameter
     result = pd.read_sql(query, db_engine, params={"as_of_date": as_of_date})
 
@@ -354,9 +421,11 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
     Returns:
         pd.DataFrame: A single-row DataFrame with columns 'item_name' and 'current_stock'.
     """
-    # Convert date to ISO string format if it's a datetime object
+    # Normalize date input to date-only format
     if isinstance(as_of_date, datetime):
-        as_of_date = as_of_date.isoformat()
+        as_of_date = as_of_date.strftime("%Y-%m-%d")
+    else:
+        as_of_date = as_of_date.split("T")[0]
 
     # SQL query to compute net stock level for the item
     stock_query = """
@@ -439,9 +508,11 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
         float: Net cash balance as of the given date. Returns 0.0 if no transactions exist or an error occurs.
     """
     try:
-        # Convert date to ISO format if it's a datetime object
+        # Normalize date input to date-only format
         if isinstance(as_of_date, datetime):
-            as_of_date = as_of_date.isoformat()
+            as_of_date = as_of_date.strftime("%Y-%m-%d")
+        else:
+            as_of_date = as_of_date.split("T")[0]
 
         # Query all transactions on or before the specified date
         transactions = pd.read_sql(
@@ -488,7 +559,7 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
     """
     # Normalize date input
     if isinstance(as_of_date, datetime):
-        as_of_date = as_of_date.isoformat()
+        as_of_date = as_of_date.strftime("%Y-%m-%d")
 
     # Get current cash balance
     cash = get_cash_balance(as_of_date)
@@ -620,7 +691,7 @@ def initialize_agent_system() -> CodeAgent:
         api_key=openai_api_key,
     )
 
-    def execute_with_retries(action_name: str, action_callable, *args, max_attempts: int = 3) -> str:
+    def execute_with_retries(action_name: str, action_callable, *args, max_attempts: int = 2) -> str:
         unclear_indicators = [
             "timeout",
             "timed out",
@@ -629,7 +700,12 @@ def initialize_agent_system() -> CodeAgent:
             "not sure",
             "unable to determine",
             "failed to generate",
-            "please try again"
+            "please try again",
+            "cannot parse",
+            "unable to parse",
+            "parse error",
+            "could not understand",
+            "not enough information",
         ]
 
         last_error = None
@@ -649,11 +725,11 @@ def initialize_agent_system() -> CodeAgent:
                 break
 
         # Final fallback after retries
-        if isinstance(last_error, ValueError):
+        error_message = str(last_error).lower() if last_error else ""
+        if isinstance(last_error, ValueError) or any(term in error_message for term in ["parse", "syntax", "unrecognized", "unable to understand"]):
             return (
-                "I’m sorry, I received an unclear or incomplete response from a sub-agent. "
-                "I attempted the operation multiple times but could not get a definitive result. "
-                "Please try again in a moment."
+                "I’m sorry, I’m having trouble understanding the request and could not complete it. "
+                "Please rephrase the request or try again later."
             )
 
         return (
@@ -670,8 +746,8 @@ def initialize_agent_system() -> CodeAgent:
 
 You are the Sales Agent for Beaver's Choice Paper Company. Handle sales transactions and financial queries.
 
-When using tools that return structured data (like transaction results), always interpret and respond in natural, customer-facing prose:
-- If a transaction succeeds, confirm it politely (e.g., "Your order has been processed successfully").
+Always respond in natural, customer-facing language and never expose transaction IDs or raw data structures.
+- If a transaction succeeds, summarize the quantity, item name, expected delivery date, and total cost in clear natural language.
 - If a transaction fails due to constraints, explain the issue clearly and professionally without technical details.
 - Never output raw dictionaries, JSON, or internal IDs.
 - Format all responses as conversational messages suitable for customers."""
@@ -685,10 +761,10 @@ When using tools that return structured data (like transaction results), always 
 
 You are the Inventory Management Agent for Beaver's Choice Paper Company. Manage inventory, restocking, and supplier interactions.
 
-When using tools that return structured data, always respond in natural prose:
+Always respond in natural, customer-facing language and never expose transaction IDs or raw data structures.
 - For transaction results, confirm successes or explain failures politely.
+- Summarize the quantity, item names, expected delivery date, and total cost when orders are placed.
 - Provide inventory information in clear, readable format.
-- Never expose raw data structures or internal details.
 - Ensure responses are professional and customer-appropriate."""
     )
 
@@ -746,11 +822,11 @@ You are the Orchestration Agent for Beaver's Choice Paper Company. Your role is 
 IMPORTANT RESPONSE GUIDELINES:
 - Always respond in natural, customer-facing prose. Never output raw dictionaries, JSON literals, or internal data structures.
 - Never expose raw transaction IDs, internal codes, or technical details to customers.
+- If a transaction succeeds, summarize the quantity, item names, expected delivery date, and total cost in plain language.
+- If a transaction cannot be placed, explain why not and offer alternatives if appropriate.
 - Ensure all dates mentioned are coherent and realistic (e.g., delivery dates should be in the future, transaction dates should be current or past).
 - When budget or stock constraints prevent fulfillment, be honest about the limitation but polite and professional.
-- Format responses as complete, conversational messages that a customer would understand.
-- If a transaction succeeds, confirm it naturally without showing IDs (e.g., "Your order has been processed successfully").
-- If a transaction fails due to constraints, explain the issue clearly and suggest alternatives if appropriate.
+- Format responses as complete conversational messages that a customer would understand.
 
 Delegate tasks to the appropriate sub-agents using the available tools, then synthesize their responses into a cohesive customer response."""
     )
@@ -792,7 +868,10 @@ class StockLevelTool(Tool):
 # Tools for ordering agent
 class CreateTransactionTool(Tool):
     name = "create_transaction"
-    description = "Records a new transaction (stock order or sale) in the database, subject to budget, stock, lead time, and policy constraints."
+    description = (
+        "Records a new transaction (stock order or sale) in the database after validating budget, stock, lead time, and policy. "
+        "Return only a natural-language confirmation or apology. Do not include transaction IDs or raw data structures."
+    )
     inputs = {
         "item_name": {"type": "string", "description": "The name of the item."},
         "transaction_type": {"type": "string", "description": "Either 'stock_orders' or 'sales'."},
@@ -800,84 +879,88 @@ class CreateTransactionTool(Tool):
         "price": {"type": "number", "description": "Total price of the transaction."},
         "date": {"type": "string", "description": "Transaction date in ISO format."}
     }
-    output_type = "object"
+    output_type = "string"
 
-    def forward(self, item_name: str, transaction_type: str, quantity: int, price: float, date: str) -> Dict:
+    def forward(self, item_name: str, transaction_type: str, quantity: int, price: float, date: str) -> str:
         # Policy checks: basic validations
         if quantity <= 0:
-            return {
-                "success": False,
-                "constraint": "policy",
-                "message": "We cannot process this order. The quantity must be a positive number. Please verify your request and try again."
-            }
-        if price < 0:
-            return {
-                "success": False,
-                "constraint": "policy",
-                "message": "We cannot process this order. The price cannot be negative. Please verify your pricing and try again."
-            }
+            return "We cannot process this order. The quantity must be a positive number. Please verify your request and try again."
         if transaction_type not in {"stock_orders", "sales"}:
-            return {
-                "success": False,
-                "constraint": "policy",
-                "message": "We cannot process this order. The transaction type is invalid. Please contact our support team for assistance."
-            }
-        
+            return "We cannot process this order. The transaction type is invalid. Please contact our support team for assistance."
+
+        unit_price = get_unit_price(item_name)
+        if unit_price is None:
+            return (
+                "We cannot process this order because the item price is unavailable. "
+                "Please verify the item name and try again."
+            )
+
+        expected_price = round(unit_price * quantity, 2)
+        if price < 0:
+            return "We cannot process this order. The price cannot be negative. Please verify your pricing and try again."
+
         # Convert date and check format
         try:
             transaction_date = datetime.fromisoformat(date.split("T")[0])
         except ValueError:
-            return {
-                "success": False,
-                "constraint": "policy",
-                "message": "We cannot process this order. The date format is invalid. Please use the ISO 8601 format (YYYY-MM-DD) and try again."
-            }
-        
+            return "We cannot process this order. The date format is invalid. Please use the ISO 8601 format (YYYY-MM-DD) and try again."
+
         if transaction_type == "sales":
             # Stock constraint check
             stock_df = get_stock_level(item_name, date)
             current_stock = stock_df["current_stock"].iloc[0] if not stock_df.empty else 0
-            
+
             if current_stock < quantity:
-                return {
-                    "success": False,
-                    "constraint": "stock",
-                    "message": f"We apologize, but we cannot fulfill this order due to insufficient inventory. You requested {quantity} units of {item_name}, but we currently have {current_stock} units available in stock. Please reduce your order quantity or contact us to discuss options."
-                }
-        
+                return (
+                    f"We apologize, but we cannot fulfill this order due to insufficient inventory. "
+                    f"You requested {quantity} units of {item_name}, but we currently have {current_stock} units available. "
+                    "Please reduce your order quantity or contact us to discuss options."
+                )
+
         elif transaction_type == "stock_orders":
             # Budget constraint check
             current_cash = get_cash_balance(date)
-            if current_cash < price:
-                return {
-                    "success": False,
-                    "constraint": "budget",
-                    "message": f"We apologize, but we cannot fulfill this order due to insufficient funds. Your order totals ${price:.2f}, but our available budget is only ${current_cash:.2f}. Please contact our procurement team to discuss alternative payment arrangements or reduce the order size."
-                }
-            
+            if current_cash < expected_price:
+                return (
+                    f"We apologize, but we cannot fulfill this order due to insufficient funds. "
+                    f"The order costs ${expected_price:.2f}, but our available budget is ${current_cash:.2f}. "
+                    "Please contact procurement to discuss alternatives or reduce the order size."
+                )
+
             # Lead time constraint check
             estimated_delivery = get_supplier_delivery_date(date, quantity)
             try:
                 delivery_dt = datetime.fromisoformat(estimated_delivery)
                 if transaction_date >= delivery_dt:
-                    return {
-                        "success": False,
-                        "constraint": "lead_time",
-                        "message": f"We apologize, but we cannot fulfill this order within the requested timeframe. Based on the order quantity of {quantity} units, the estimated delivery date is {estimated_delivery}. The transaction date you specified ({date.split('T')[0]}) does not allow sufficient time for delivery. Please extend your delivery window or reduce the order quantity for faster processing."
-                    }
+                    return (
+                        f"We apologize, but we cannot fulfill this order within the requested timeframe. "
+                        f"Based on {quantity} units, the estimated delivery date is {estimated_delivery}. "
+                        f"The requested order date {date.split('T')[0]} does not allow enough lead time. "
+                        "Please extend the delivery window or reduce the order quantity for faster processing."
+                    )
             except ValueError:
                 pass  # If parsing fails, skip this check
-        
-        # If all checks pass, create the transaction
+
+        # If all checks pass, create the transaction using unit_price * quantity.
         try:
-            transaction_id = create_transaction(item_name, transaction_type, quantity, price, date)
-            return {"success": True, "transaction_id": transaction_id}
-        except Exception as e:
-            return {
-                "success": False,
-                "constraint": "system",
-                "message": "We apologize for the inconvenience. An unexpected error occurred while processing your order. Please try again, or contact our support team if the problem persists."
-            }
+            transaction_id = create_transaction(item_name, transaction_type, quantity, expected_price, date)
+            if transaction_id and transaction_exists(transaction_id):
+                delivery_date = get_supplier_delivery_date(date, quantity)
+                item_desc = f"{quantity} units of {item_name}" if item_name else f"{quantity} units"
+                order_type = "sales order" if transaction_type == "sales" else "stock order"
+                return (
+                    f"Your {order_type} for {item_desc} has been placed successfully. "
+                    f"It is expected to be delivered by {delivery_date}, and the total cost is ${expected_price:.2f}."
+                )
+            return (
+                "We apologize for the inconvenience. Your order could not be confirmed in our system after processing. "
+                "Please try again or contact support for assistance."
+            )
+        except Exception:
+            return (
+                "We apologize for the inconvenience. An unexpected error occurred while processing your order. "
+                "Please try again, or contact our support team if the problem persists."
+            )
 
 class SupplierDeliveryTool(Tool):
     name = "get_supplier_delivery_date"
@@ -928,7 +1011,8 @@ class QuoteHistoryTool(Tool):
 def run_test_scenarios():
     
     print("Initializing Database...")
-    init_database(db_engine)
+    if not is_database_initialized(db_engine):
+        init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv(os.path.join(SCRIPT_DIR, "quote_requests_sample.csv"))
         quote_requests_sample = quote_requests_sample.assign(
