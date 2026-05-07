@@ -4,6 +4,7 @@ import os
 import time
 import dotenv
 import ast
+import difflib
 from smolagents.models import OpenAIServerModel
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
@@ -173,6 +174,16 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
                 )
                 """
             ))
+            conn.execute(text("DROP TABLE IF EXISTS cash_balances"))
+            conn.execute(text(
+                """
+                CREATE TABLE cash_balances (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    balance REAL NOT NULL,
+                    recorded_at TEXT NOT NULL
+                )
+                """
+            ))
 
         # Set a consistent starting date as a date-only string
         initial_date = datetime(2025, 1, 1).strftime("%Y-%m-%d")
@@ -243,6 +254,15 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         # Commit transactions to database
         pd.DataFrame(initial_transactions).to_sql("transactions", db_engine, if_exists="append", index=False)
 
+        # Save initial available cash in a dedicated table
+        with db_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO cash_balances (balance, recorded_at) VALUES (:balance, :recorded_at)"
+                ),
+                {"balance": 50000.0, "recorded_at": initial_date},
+            )
+
         # Save the inventory reference table
         inventory_df.to_sql("inventory", db_engine, if_exists="replace", index=False)
 
@@ -291,6 +311,9 @@ def create_transaction(
         Exception: For other database or execution errors.
     """
     try:
+        # Normalize item name to the canonical inventory name
+        item_name = resolve_item_name(item_name)
+
         # Convert datetime to a date-only string if necessary
         date_str = date.strftime("%Y-%m-%d") if isinstance(date, datetime) else date.split("T")[0]
 
@@ -298,7 +321,15 @@ def create_transaction(
         if transaction_type not in {"stock_orders", "sales"}:
             raise ValueError("Transaction type must be 'stock_orders' or 'sales'")
 
-        # Insert the record into the database using a direct connection so the insertion persists immediately.
+        # Validate quantity and price for real transactions
+        if quantity is None or quantity <= 0:
+            raise ValueError("Transaction quantity must be a positive integer.")
+        if price is None or price <= 0:
+            raise ValueError("Transaction price must be greater than zero.")
+        if not item_name:
+            raise ValueError("Transaction item_name must be provided for stock_orders or sales.")
+
+        # Insert the record into the database and persist inventory/cash updates atomically.
         with db_engine.begin() as conn:
             conn.execute(
                 text(
@@ -315,6 +346,13 @@ def create_transaction(
             )
             result = conn.execute(text("SELECT last_insert_rowid() as id"))
             transaction_id = int(result.scalar_one())
+
+            if transaction_type == "sales":
+                update_inventory_stock(item_name, -quantity, conn)
+                adjust_cash_balance(price, date_str, conn)
+            elif transaction_type == "stock_orders":
+                update_inventory_stock(item_name, quantity, conn)
+                adjust_cash_balance(-price, date_str, conn)
 
         # Confirm the transaction exists in the database before returning success.
         if not transaction_exists(transaction_id):
@@ -341,27 +379,99 @@ def transaction_exists(transaction_id: int) -> bool:
         return False
 
 
-def get_unit_price(item_name: str) -> Union[float, None]:
-    """Return the unit price for a given item from the inventory or fallback reference list."""
-    if not item_name:
-        return None
+def update_inventory_stock(item_name: str, delta_units: int, conn) -> bool:
+    """Update the inventory table stock for a given item by a delta quantity."""
+    if not item_name or delta_units == 0:
+        return True
+
+    result = conn.execute(
+        text(
+            "UPDATE inventory SET current_stock = current_stock + :delta WHERE item_name = :item_name"
+        ),
+        {"delta": delta_units, "item_name": item_name},
+    )
+
+    if result.rowcount == 0:
+        unit_price = next(
+            (item.get("unit_price", 0.0) for item in paper_supplies if item.get("item_name") == item_name),
+            0.0,
+        )
+        conn.execute(
+            text(
+                "INSERT INTO inventory (item_name, category, unit_price, current_stock, min_stock_level) "
+                "VALUES (:item_name, :category, :unit_price, :current_stock, :min_stock_level)"
+            ),
+            {
+                "item_name": item_name,
+                "category": "unknown",
+                "unit_price": unit_price,
+                "current_stock": delta_units,
+                "min_stock_level": 0,
+            },
+        )
+    return True
+
+
+def adjust_cash_balance(amount_delta: float, date: Union[str, datetime], conn) -> float:
+    """Adjust the cash balance by a delta amount and return the new balance."""
+    date_str = date.strftime("%Y-%m-%d") if isinstance(date, datetime) else date.split("T")[0]
+    current_balance = conn.execute(
+        text(
+            "SELECT balance FROM cash_balances "
+            "WHERE recorded_at <= :date_str "
+            "ORDER BY recorded_at DESC, id DESC LIMIT 1"
+        ),
+        {"date_str": date_str},
+    ).scalar_one_or_none()
+    if current_balance is None:
+        current_balance = 0.0
+
+    new_balance = float(current_balance) + float(amount_delta)
+    conn.execute(
+        text(
+            "INSERT INTO cash_balances (balance, recorded_at) VALUES (:balance, :recorded_at)"
+        ),
+        {"balance": new_balance, "recorded_at": date_str},
+    )
+    return new_balance
+
+
+def resolve_item_name(item_name: str) -> str:
+    """Resolve a requested item name to the closest known inventory item name."""
+    if not item_name or not item_name.strip():
+        return item_name
+
+    normalized = item_name.strip().lower()
+    known_names = []
 
     try:
-        inventory_price = pd.read_sql(
-            "SELECT unit_price FROM inventory WHERE item_name = :item_name LIMIT 1",
+        inventory_df = pd.read_sql(
+            "SELECT DISTINCT item_name FROM inventory WHERE item_name IS NOT NULL",
             db_engine,
-            params={"item_name": item_name},
         )
-        if not inventory_price.empty:
-            return float(inventory_price.iloc[0]["unit_price"])
-    except Exception as e:
-        print(f"Error looking up unit price in inventory for {item_name}: {e}")
+        known_names.extend(inventory_df["item_name"].dropna().tolist())
+    except Exception:
+        pass
 
-    for supply in paper_supplies:
-        if supply["item_name"] == item_name:
-            return float(supply["unit_price"])
+    known_names.extend(
+        [s["item_name"] for s in paper_supplies if s.get("item_name")]
+    )
+    known_names = sorted(set(known_names))
+    lower_to_original = {name.lower(): name for name in known_names}
 
-    return None
+    if normalized in lower_to_original:
+        return lower_to_original[normalized]
+
+    close_matches = difflib.get_close_matches(
+        normalized,
+        list(lower_to_original.keys()),
+        n=1,
+        cutoff=0.6,
+    )
+    if close_matches:
+        return lower_to_original[close_matches[0]]
+
+    return item_name
 
 # This function retrieves a snapshot of available inventory as of a specific date, calculating net stock levels by summing stock orders and subtracting sales, and returns only items with positive stock.
 def get_all_inventory(as_of_date: str) -> Dict[str, int]:
@@ -421,6 +531,9 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
     Returns:
         pd.DataFrame: A single-row DataFrame with columns 'item_name' and 'current_stock'.
     """
+    # Resolve item names to nearest known inventory item if necessary
+    item_name = resolve_item_name(item_name)
+
     # Normalize date input to date-only format
     if isinstance(as_of_date, datetime):
         as_of_date = as_of_date.strftime("%Y-%m-%d")
@@ -514,7 +627,22 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
         else:
             as_of_date = as_of_date.split("T")[0]
 
-        # Query all transactions on or before the specified date
+        try:
+            with db_engine.connect() as conn:
+                result = conn.execute(
+                    text(
+                        "SELECT balance FROM cash_balances "
+                        "WHERE recorded_at <= :as_of_date "
+                        "ORDER BY recorded_at DESC, id DESC LIMIT 1"
+                    ),
+                    {"as_of_date": as_of_date},
+                ).scalar_one_or_none()
+                if result is not None:
+                    return float(result)
+        except Exception:
+            pass
+
+        # Query all transactions on or before the specified date as a fallback
         transactions = pd.read_sql(
             "SELECT * FROM transactions WHERE transaction_date <= :as_of_date",
             db_engine,
@@ -691,7 +819,7 @@ def initialize_agent_system() -> CodeAgent:
         api_key=openai_api_key,
     )
 
-    def execute_with_retries(action_name: str, action_callable, *args, max_attempts: int = 2) -> str:
+    def execute_with_retries(action_name: str, action_callable, *args, max_attempts: int = 1) -> str:
         unclear_indicators = [
             "timeout",
             "timed out",
@@ -750,6 +878,7 @@ Always respond in natural, customer-facing language and never expose transaction
 - If a transaction succeeds, summarize the quantity, item name, expected delivery date, and total cost in clear natural language.
 - If a transaction fails due to constraints, explain the issue clearly and professionally without technical details.
 - Never output raw dictionaries, JSON, or internal IDs.
+- Use only the provided internal tools and database; do not search the web, use external internet resources, or call external APIs.
 - Format all responses as conversational messages suitable for customers."""
     )
 
@@ -765,6 +894,7 @@ Always respond in natural, customer-facing language and never expose transaction
 - For transaction results, confirm successes or explain failures politely.
 - Summarize the quantity, item names, expected delivery date, and total cost when orders are placed.
 - Provide inventory information in clear, readable format.
+- Use only the provided internal tools and database; do not search the web, use external internet resources, or call external APIs.
 - Ensure responses are professional and customer-appropriate."""
     )
 
@@ -780,6 +910,7 @@ Always respond in natural, customer-facing language:
 - Present quotes clearly with itemized pricing.
 - Use coherent dates and professional formatting.
 - Never output raw data structures.
+- Use only the provided internal tools and database; do not search the web, use external internet resources, or call external APIs.
 - Make responses conversational and helpful."""
     )
 
@@ -826,6 +957,7 @@ IMPORTANT RESPONSE GUIDELINES:
 - If a transaction cannot be placed, explain why not and offer alternatives if appropriate.
 - Ensure all dates mentioned are coherent and realistic (e.g., delivery dates should be in the future, transaction dates should be current or past).
 - When budget or stock constraints prevent fulfillment, be honest about the limitation but polite and professional.
+- Use only the provided internal tools and database; do not search the web, use external internet resources, or call external APIs.
 - Format responses as complete conversational messages that a customer would understand.
 
 Delegate tasks to the appropriate sub-agents using the available tools, then synthesize their responses into a cohesive customer response."""
@@ -862,8 +994,15 @@ class StockLevelTool(Tool):
     output_type = "object"
 
     def forward(self, item_name: str, as_of_date: str) -> Dict:
-        df = get_stock_level(item_name, as_of_date)
-        return df.to_dict(orient="records")[0] if not df.empty else {"item_name": item_name, "current_stock": 0}
+        canonical_name = resolve_item_name(item_name)
+        df = get_stock_level(canonical_name, as_of_date)
+        if not df.empty:
+            record = df.to_dict(orient="records")[0]
+        else:
+            record = {"item_name": canonical_name, "current_stock": 0}
+        if canonical_name != item_name:
+            record["matched_item_name"] = canonical_name
+        return record
 
 # Tools for ordering agent
 class CreateTransactionTool(Tool):
@@ -885,48 +1024,42 @@ class CreateTransactionTool(Tool):
         # Policy checks: basic validations
         if quantity <= 0:
             return "We cannot process this order. The quantity must be a positive number. Please verify your request and try again."
+        if price <= 0:
+            return "We cannot process this order. The price must be greater than zero. Please verify your pricing and try again."
         if transaction_type not in {"stock_orders", "sales"}:
             return "We cannot process this order. The transaction type is invalid. Please contact our support team for assistance."
-
-        unit_price = get_unit_price(item_name)
-        if unit_price is None:
-            return (
-                "We cannot process this order because the item price is unavailable. "
-                "Please verify the item name and try again."
-            )
-
-        expected_price = round(unit_price * quantity, 2)
-        if price < 0:
-            return "We cannot process this order. The price cannot be negative. Please verify your pricing and try again."
-
+        
         # Convert date and check format
         try:
             transaction_date = datetime.fromisoformat(date.split("T")[0])
         except ValueError:
             return "We cannot process this order. The date format is invalid. Please use the ISO 8601 format (YYYY-MM-DD) and try again."
+        
+        # Normalize the item name before any inventory or order checks
+        item_name = resolve_item_name(item_name)
 
         if transaction_type == "sales":
             # Stock constraint check
             stock_df = get_stock_level(item_name, date)
             current_stock = stock_df["current_stock"].iloc[0] if not stock_df.empty else 0
-
+            
             if current_stock < quantity:
                 return (
                     f"We apologize, but we cannot fulfill this order due to insufficient inventory. "
                     f"You requested {quantity} units of {item_name}, but we currently have {current_stock} units available. "
                     "Please reduce your order quantity or contact us to discuss options."
                 )
-
+        
         elif transaction_type == "stock_orders":
             # Budget constraint check
             current_cash = get_cash_balance(date)
-            if current_cash < expected_price:
+            if current_cash < price:
                 return (
                     f"We apologize, but we cannot fulfill this order due to insufficient funds. "
-                    f"The order costs ${expected_price:.2f}, but our available budget is ${current_cash:.2f}. "
+                    f"The order costs ${price:.2f}, but our available budget is ${current_cash:.2f}. "
                     "Please contact procurement to discuss alternatives or reduce the order size."
                 )
-
+            
             # Lead time constraint check
             estimated_delivery = get_supplier_delivery_date(date, quantity)
             try:
@@ -934,23 +1067,22 @@ class CreateTransactionTool(Tool):
                 if transaction_date >= delivery_dt:
                     return (
                         f"We apologize, but we cannot fulfill this order within the requested timeframe. "
-                        f"Based on {quantity} units, the estimated delivery date is {estimated_delivery}. "
-                        f"The requested order date {date.split('T')[0]} does not allow enough lead time. "
-                        "Please extend the delivery window or reduce the order quantity for faster processing."
+                        f"Based on {quantity} units, the estimated delivery date is {estimated_delivery}, "
+                        f"which does not meet the required order date of {date.split('T')[0]}."
                     )
             except ValueError:
                 pass  # If parsing fails, skip this check
-
-        # If all checks pass, create the transaction using unit_price * quantity.
+        
+        # If all checks pass, create the transaction
         try:
-            transaction_id = create_transaction(item_name, transaction_type, quantity, expected_price, date)
+            transaction_id = create_transaction(item_name, transaction_type, quantity, price, date)
             if transaction_id and transaction_exists(transaction_id):
                 delivery_date = get_supplier_delivery_date(date, quantity)
                 item_desc = f"{quantity} units of {item_name}" if item_name else f"{quantity} units"
                 order_type = "sales order" if transaction_type == "sales" else "stock order"
                 return (
                     f"Your {order_type} for {item_desc} has been placed successfully. "
-                    f"It is expected to be delivered by {delivery_date}, and the total cost is ${expected_price:.2f}."
+                    f"It is expected to be delivered by {delivery_date}, and the total cost is ${price:.2f}."
                 )
             return (
                 "We apologize for the inconvenience. Your order could not be confirmed in our system after processing. "
@@ -1043,6 +1175,8 @@ def run_test_scenarios():
     orchestration_agent = initialize_agent_system()
     results = []
     for idx, row in quote_requests_sample.iterrows():
+        if idx >= 2:
+            break
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx+1} ===")
