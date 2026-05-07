@@ -1,29 +1,31 @@
 request_id,request_date,cash_balance,inventory_value,response
-1,2025-04-01,45059.7,4940.299999999999,"The request for paper supplies has been successfully recorded for delivery by April 15, 2025."
-2,2025-04-03,45059.7,4940.299999999999,"Order placed successfully with the following details: Colorful poster paper (500 sheets), Streamers (300 rolls), Balloons (200), all to be delivered by April 19, 2025."
-3,2025-04-04,45059.7,4940.299999999999,"Orders for 10,000 sheets of A4 paper, 5,000 sheets of A3 paper, and 500 reams of printer paper have been successfully placed for delivery on April 15, 2025."
-4,2025-04-05,45059.7,4940.299999999999,"Orders placed successfully: 500 sheets of high-quality, recycled cardstock and 250 sheets of A4 printer paper, both to be delivered by April 15, 2025."
-5,2025-04-05,45059.7,4940.299999999999,"Order placed successfully for 500 sheets of 8.5""x11"" colored paper, 300 sheets of cardstock, and 200 rolls of decorative washi tape. Delivery needed by April 15, 2025."
-6,2025-04-06,45059.7,4940.299999999999,"{'message': 'Order placed successfully for all items with delivery by April 15, 2025.', 'quote': 200.0}"
-7,2025-04-07,45059.7,4940.299999999999,The large order for the exhibition has been successfully placed.
-8,2025-04-07,45059.7,4940.299999999999,The large order for paper supplies has been successfully placed.
-9,2025-04-07,45059.7,4940.299999999999,Order placed successfully with Transaction ID: 76
-13,2025-04-08,45059.7,4940.299999999999,"Successfully ordered 500 sheets of A4 printing paper and 200 sheets of cardstock for delivery by April 10, 2025."
-12,2025-04-08,45059.7,4940.299999999999,"
-The following orders have been successfully placed:
+1,2025-04-01,45059.7,4940.299999999999,"The paper supplies have been successfully requested for delivery by April 15, 2025."
+2,2025-04-03,45059.7,4940.299999999999,"Order has been successfully placed for 500 sheets of colorful poster paper, 300 rolls of streamers, and 200 balloons, to be delivered by April 15, 2025."
+3,2025-04-04,45059.7,4940.299999999999,"Order Summary:
+- 10,000 sheets of A4 paper: Successful
+- 5,000 sheets of A3 paper: Successful
+- 500 reams of printer paper: Successful
 
-1. 200 sheets of colorful cardstock - Transaction ID: 83
-2. 500 sheets of standard printer paper - Transaction ID: 84
-3. 100 paper napkins - Transaction ID: 87
-
-All items will be delivered by April 15, 2025.
-"
-10,2025-04-08,45059.7,4940.299999999999,Order has been successfully placed for 500 sheets of high-quality glossy paper and 300 sheets of sturdy cardstock.
-11,2025-04-08,45059.7,4940.299999999999,Order placed successfully with transaction ID: 94.
-14,2025-04-09,45059.7,4940.299999999999,"The order has been placed, but the delivery date cannot meet the requested deadline. Please verify if the estimated delivery on April 22, 2025, is acceptable."
-15,2025-04-12,44999.7,4940.299999999999,The order for paper supplies has been placed successfully with Transaction ID: 103.
-16,2025-04-13,44999.7,4940.299999999999,Order placed successfully. Transaction ID: 106.
-17,2025-04-14,44999.7,4940.299999999999,"Order placed successfully for the paper supplies. Summary: {'A4 white printer paper': 1000, 'A3 colored paper (assorted colors)': 500, 'table napkins (white)': 2000, 'paper cups (biodegradable)': 1000, 'paper plates (biodegradable)': 500, 'Delivery Date': 'April 15, 2025'}"
-18,2025-04-14,44999.7,4940.299999999999,Order successfully placed for supplies with Transaction ID: 131.
-19,2025-04-15,29959.700000000004,5015.3,"The paper supplies have been successfully ordered: 2000 sheets of A4 glossy paper, 1500 sheets of A3 matte paper, and 1000 sheets of cardstock in assorted colors."
-20,2025-04-17,29959.700000000004,5015.3,"Here are some alternatives for your order: Reduce the quantity of each item., Look for lower-cost alternatives for printing or obtaining items., Explore options to increase budget or cash flow., Consider phased ordering of the items."
+All items are scheduled for delivery by April 15, 2025."
+4,2025-04-05,45059.7,4940.299999999999,"The order for 500 sheets of high-quality recycled cardstock and 250 sheets of A4 size printer paper has been successfully confirmed for delivery by April 15, 2025."
+5,2025-04-05,45059.7,4940.299999999999,"Order placed successfully for 500 sheets of 8.5""x11"" colored paper, 300 sheets of cardstock, and 200 rolls of decorative washi tape for delivery by April 15, 2025."
+6,2025-04-06,45059.7,4940.299999999999,"Order successfully placed for 500 sheets of colorful construction paper, 300 sheets of white printer paper, and 200 sheets of cardstock with delivery by April 15, 2025."
+7,2025-04-07,45059.7,4940.299999999999,"{'glossy A4 sheets': {'transaction_id': 49, 'quantity': 500}, 'matte A3 sheets': {'transaction_id': 50, 'quantity': 1000}, 'poster boards (24"" x 36"")': {'transaction_id': 51, 'quantity': 300}, 'heavyweight cardstock sheets': {'transaction_id': 52, 'quantity': 200}}"
+8,2025-04-07,45009.7,4940.299999999999,Order placed successfully with transaction ID: 59.
+9,2025-04-07,45009.7,4940.299999999999,"Order placed successfully for 200 sheets of A4 white printer paper, 100 sheets of A3 glossy paper, and 50 packets of 100% recycled kraft paper envelopes. Delivery is scheduled for April 10, 2025."
+13,2025-04-08,44934.7,4940.299999999999,"Order for 500 sheets of A4 printing paper and 200 sheets of cardstock has been placed successfully for delivery by April 10, 2025."
+12,2025-04-08,44934.7,4940.299999999999,"The order for 200 sheets of colorful cardstock, 500 sheets of standard printer paper, and 100 paper napkins has been successfully placed for delivery by April 15, 2025."
+10,2025-04-08,44934.7,4940.299999999999,Order for 500 sheets of high-quality glossy paper and 300 sheets of sturdy cardstock is on hold due to insufficient funds. A message has been sent to the procurement team to discuss alternative payment arrangements or reduce the order size.
+11,2025-04-08,44934.7,4940.299999999999,Confirmed the use of existing A4 matte paper inventory for the exhibition.
+14,2025-04-09,44934.7,4940.299999999999,Communication with the procurement team has been initiated to discuss cash management strategies and evaluate options for our paper supply order.
+15,2025-04-12,44884.7,4940.299999999999,The order for paper supplies cannot be placed due to insufficient budget. The procurement team has been contacted to resolve the issue.
+16,2025-04-13,44884.7,4940.299999999999,Order placed successfully with transaction ID: 78
+17,2025-04-14,44884.7,4940.299999999999,All paper supply orders have been successfully placed for the upcoming reception.
+18,2025-04-14,44884.7,4940.299999999999,Action taken: Requested budget increase for paper supplies order. Current status: Awaiting procurement team's response.
+19,2025-04-15,0.0,6485.3,"Order confirmed for 2000 sheets of A4 glossy paper, 1500 sheets of A3 matte paper, and 1000 sheets of cardstock in assorted colors, to be delivered by April 20, 2025."
+20,2025-04-17,0.0,6485.3,"Please review and approve the budget of $2000.00 to place an order for: 
+- 5000 flyers
+- 2000 posters
+- 10000 tickets
+Total Quantity: 20000
+Current Cash Balance: $0.00. Immediate action is required to secure the necessary budget for the order."
