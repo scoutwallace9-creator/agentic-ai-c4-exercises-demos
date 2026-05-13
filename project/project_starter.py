@@ -671,20 +671,141 @@ def resolve_item_names(request_text: str) -> Dict[str, str]:
 def resolve_request_text(request_text: str, resolved_names: Dict[str, str]) -> str:
     """
     Replace mentioned item names in the request text with their resolved canonical names.
+    
+    This function aggressively replaces all mentions of items (including the original
+    fuzzy-matched phrases and their variations) with ONLY the canonical database names.
 
     Args:
         request_text (str): The original request text.
         resolved_names (Dict[str, str]): Mapping from mentioned names to canonical names.
 
     Returns:
-        str: The request text with names resolved.
+        str: The request text with ONLY canonical names, no original descriptions.
     """
     resolved_text = request_text
-    for mentioned, canonical in resolved_names.items():
-        # Replace case-insensitively
-        pattern = re.compile(re.escape(mentioned), re.IGNORECASE)
-        resolved_text = pattern.sub(canonical, resolved_text)
+    
+    # Sort by length (longest first) to handle overlapping matches better
+    sorted_items = sorted(resolved_names.items(), key=lambda x: len(x[0]), reverse=True)
+    
+    for mentioned, canonical in sorted_items:
+        # Find all phrases that contain the mentioned item and replace the phrase with just the canonical name
+        # Pattern: capture quantity+unit, then the item phrase, then optional trailing text until punctuation/comma/newline
+        pattern = re.compile(
+            r'(\d+\s*(?:sheets?|rolls?|packets?|reams?)\s+(?:of\s+)?)' +  # quantity + unit + "of"
+            r'([^,\n]*?' + re.escape(mentioned) + r'[^,\n]*?)' +  # the fuzzy mention with surrounding text
+            r'(?=[,\n\.]|\s*(?:I|for|by|and|or)|$)',  # lookahead: stop at punctuation, common words, or end
+            re.IGNORECASE
+        )
+        
+        def replace_func(match):
+            quantity_unit = match.group(1).strip()
+            # Return just the quantity/unit + canonical name (no descriptors like "white", "assorted", etc.)
+            return f"{quantity_unit} {canonical}"
+        
+        resolved_text = pattern.sub(replace_func, resolved_text)
+    
     return resolved_text
+
+# This function extracts items and quantities from a request, using only resolved names.
+def extract_items_from_request(request_text: str, resolved_names: Dict[str, str]) -> List[Dict[str, str]]:
+    """
+    Extract items and quantities from request text using resolved canonical names.
+    
+    This function searches for quantity patterns (e.g., "200 sheets of X") and maps
+    mentions to their resolved canonical names, extracting only valid items.
+
+    Args:
+        request_text (str): The customer request text.
+        resolved_names (Dict[str, str]): Mapping from mentioned names to canonical names.
+
+    Returns:
+        List[Dict]: A list of dictionaries with 'quantity', 'unit', and 'canonical_name' keys.
+    """
+    extracted_items = []
+    
+    # Pattern to extract quantity + unit + item name
+    patterns = [
+        r'(\d+)\s*(?:sheets?|rolls?|packets?|reams?)\s+of\s+([^,\n]+)',
+        r'(\d+)\s*(?:sheets?|rolls?|packets?|reams?)\s+([^,\n]+)',
+    ]
+    
+    # Extract all quantity mentions
+    matches = []
+    for pattern in patterns:
+        found = re.findall(pattern, request_text.lower())
+        matches.extend(found)
+    
+    # Map each mention to its resolved canonical name
+    for quantity_str, item_mention in matches:
+        quantity = int(quantity_str)
+        item_mention = item_mention.strip()
+        
+        # Find the matching resolved name
+        canonical_name = None
+        for mentioned, resolved in resolved_names.items():
+            if mentioned in item_mention or item_mention.startswith(mentioned):
+                canonical_name = resolved
+                break
+        
+        if canonical_name:
+            extracted_items.append({
+                'quantity': quantity,
+                'unit': 'sheets' if 'sheet' in item_mention else 'rolls',
+                'canonical_name': canonical_name
+            })
+    
+    return extracted_items
+
+# This function processes a customer request with name resolution as the first step.
+def process_customer_request(request_text: str, request_date: str, orchestration_agent: CodeAgent) -> Dict:
+    """
+    Process a customer request with name resolution as the first mandatory step.
+    
+    This ensures that all item names are resolved to canonical database names before
+    any processing occurs. The resolved names are carried throughout the entire workflow.
+
+    Args:
+        request_text (str): The raw customer request text.
+        request_date (str): The date of the request in ISO format (YYYY-MM-DD).
+        orchestration_agent (CodeAgent): The orchestration agent to process the resolved request.
+
+    Returns:
+        Dict: A dictionary containing:
+            - 'original_request': The raw request text
+            - 'request_date': The request date
+            - 'resolved_names': Dictionary of resolved item names
+            - 'resolved_request': The request text with canonical names
+            - 'response': The agent's response
+    """
+    # STEP 1: RESOLVE ITEM NAMES (First and mandatory step)
+    resolved_names = resolve_item_names(request_text)
+    
+    # STEP 2: Replace names in request text with resolved names
+    resolved_request = resolve_request_text(request_text, resolved_names) if resolved_names else request_text
+    
+    # STEP 3: Log the resolution
+    if resolved_names:
+        print(f"✓ Name Resolution: {resolved_names}")
+    else:
+        print("✓ No item name resolution needed")
+    
+    # STEP 4: Create structured request message with ONLY resolved request (no metadata about resolution)
+    request_with_metadata = f"{resolved_request}\n\n(Date of request: {request_date})"
+    
+    # STEP 5: Process the resolved request through the orchestration agent
+    print("→ Processing request through orchestration agent...")
+    response = orchestration_agent.run(request_with_metadata)
+    
+    # STEP 6: Return complete workflow result with resolution metadata
+    return {
+        'original_request': request_text,
+        'request_date': request_date,
+        'resolved_names': resolved_names,
+        'resolved_request': resolved_request,
+        'response': response,
+        'resolution_applied': bool(resolved_names)
+    }
+
 
 
 ########################
@@ -935,29 +1056,16 @@ def run_test_scenarios():
         print(f"Cash Balance: ${current_cash:.2f}")
         print(f"Inventory Value: ${current_inventory:.2f}")
 
-        # Process request
-        request_with_date = f"{row['request']} (Date of request: {request_date})"
-
-        # Resolve item names before processing
-        resolved_names = resolve_item_names(row['request'])
-        if resolved_names:
-            resolution_info = f"Resolved item names: {resolved_names}"
-            print(f"Name Resolution: {resolution_info}")
-            # Replace names in the request text
-            resolved_request = resolve_request_text(row['request'], resolved_names)
-            request_with_date = f"{resolved_request} (Date of request: {request_date})"
-            request_with_date += f"\n\n{resolution_info}"
-
-        response = orchestration_agent.run(request_with_date)
-
-        # Update state
+        # PROCESS REQUEST WITH NAME RESOLUTION AS FIRST STEP
+        print("→ Starting request workflow with name resolution...")
+        workflow_result = process_customer_request(row['request'], request_date, orchestration_agent)
 
         # Update state
         report = generate_financial_report(request_date)
         current_cash = report["cash_balance"]
         current_inventory = report["inventory_value"]
 
-        print(f"Response: {response}")
+        print(f"Response: {workflow_result['response']}")
         print(f"Updated Cash: ${current_cash:.2f}")
         print(f"Updated Inventory: ${current_inventory:.2f}")
 
@@ -967,7 +1075,7 @@ def run_test_scenarios():
                 "request_date": request_date,
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
-                "response": response,
+                "response": workflow_result['response']
             }
         )
 

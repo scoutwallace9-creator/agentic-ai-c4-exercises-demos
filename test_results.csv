@@ -1,2 +1,4 @@
 request_id,request_date,cash_balance,inventory_value,response
-1,2025-04-01,43676.7,4965.3,"{'Glossy Paper': 'Request acknowledged.', 'Cardstock': 'Not available in inventory.', 'Colored Paper': 'Order placed successfully (Transaction ID: 23).'}"
+1,2025-04-01,45059.7,4940.299999999999,"Stock order placed successfully for 200 sheets of Glossy paper, 100 sheets of Cardstock, and 100 sheets of Colored paper to be delivered by April 15, 2025."
+2,2025-04-03,45059.7,4940.299999999999,Order for 500 sheets of A4 paper has been successfully placed (Transaction ID: 23). Orders for 300 rolls of colored ribbons and 200 DIY pom-poms were not placed due to inventory unavailability.
+3,2025-04-04,44924.7,6440.299999999999,"The order for 15,000 sheets of A4 paper has been confirmed with transaction ID: 26. Printer paper is currently unavailable."
