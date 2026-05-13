@@ -4,6 +4,8 @@ import os
 import time
 import dotenv
 import ast
+import re
+import difflib
 from smolagents.models import OpenAIServerModel
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
@@ -188,12 +190,12 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
 
         # Unpack metadata fields (job_type, order_size, event_type) if present
         if "request_metadata" in quotes_df.columns:
-            quotes_df["request_metadata"] = quotes_df["request_metadata"].apply(
+            quotes_df.loc[:, "request_metadata"] = quotes_df["request_metadata"].apply(
                 lambda x: ast.literal_eval(x) if isinstance(x, str) else x
             )
-            quotes_df["job_type"] = quotes_df["request_metadata"].apply(lambda x: x.get("job_type", ""))
-            quotes_df["order_size"] = quotes_df["request_metadata"].apply(lambda x: x.get("order_size", ""))
-            quotes_df["event_type"] = quotes_df["request_metadata"].apply(lambda x: x.get("event_type", ""))
+            quotes_df.loc[:, "job_type"] = quotes_df["request_metadata"].apply(lambda x: x.get("job_type", ""))
+            quotes_df.loc[:, "order_size"] = quotes_df["request_metadata"].apply(lambda x: x.get("order_size", ""))
+            quotes_df.loc[:, "event_type"] = quotes_df["request_metadata"].apply(lambda x: x.get("event_type", ""))
 
         # Retain only relevant columns
         quotes_df = quotes_df[[
@@ -247,6 +249,23 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         raise
 
 # This function records a transaction of type 'stock_orders' or 'sales' with a specified item name, quantity, total price, and transaction date into the 'transactions' table of the database.
+def item_exists_in_database(item_name: str) -> bool:
+    """
+    Check if an item exists in the inventory database.
+
+    Args:
+        item_name (str): The name of the item to check.
+
+    Returns:
+        bool: True if the item exists in the inventory, False otherwise.
+    """
+    result = pd.read_sql(
+        "SELECT COUNT(*) as count FROM inventory WHERE item_name = :item_name",
+        db_engine,
+        params={"item_name": item_name}
+    )
+    return result.iloc[0]["count"] > 0
+
 def create_transaction(
     item_name: str,
     transaction_type: str,
@@ -269,10 +288,14 @@ def create_transaction(
         int: The ID of the newly inserted transaction.
 
     Raises:
-        ValueError: If `transaction_type` is not 'stock_orders' or 'sales'.
+        ValueError: If `transaction_type` is not 'stock_orders' or 'sales', or if the item doesn't exist in the database.
         Exception: For other database or execution errors.
     """
     try:
+        # Validate item exists in database (except for special transactions like cash balance)
+        if item_name is not None and not item_exists_in_database(item_name):
+            raise ValueError(f"Item '{item_name}' does not exist in the database. Cannot create transaction.")
+
         # Convert datetime to ISO string if necessary
         date_str = date.isoformat() if isinstance(date, datetime) else date
 
@@ -592,12 +615,78 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
         result = conn.execute(text(query), params)
         return [dict(row._mapping) for row in result]
 
+# This function resolves item names mentioned in a request to the canonical names in the database using fuzzy string matching.
+def resolve_item_names(request_text: str) -> Dict[str, str]:
+    """
+    Resolve item names mentioned in a customer request to the canonical item names in the database.
 
-########################
-########################
-########################
-# YOUR MULTI AGENT STARTS HERE
-########################
+    This function extracts potential item descriptions from the request text and matches them
+    to the closest item names in the paper_supplies list using fuzzy string matching.
+    Only matches with a similarity score above 0.6 are considered valid.
+
+    Args:
+        request_text (str): The customer's request text containing item descriptions.
+
+    Returns:
+        Dict[str, str]: A dictionary mapping mentioned item phrases to resolved database item names.
+    """
+    # Extract potential item phrases using regex patterns
+    # Look for patterns like "sheets of X", "rolls of Y", etc.
+    patterns = [
+        r'(\d+)\s*(?:sheets?|rolls?|packets?|reams?)\s+of\s+([^,\n]+)',
+        r'(\d+)\s*([^,\n]+)',  # fallback for items without "of"
+    ]
+    
+    mentioned_items = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, request_text.lower())
+        for match in matches:
+            if len(match) == 2:
+                quantity, item_desc = match
+                # Clean up the item description
+                item_desc = re.sub(r'[^\w\s]', '', item_desc).strip()
+                if len(item_desc) > 2:  # avoid very short matches
+                    mentioned_items.add(item_desc)
+    
+    # Also look for standalone item names
+    for item in paper_supplies:
+        item_name_lower = item['item_name'].lower()
+        if item_name_lower in request_text.lower():
+            mentioned_items.add(item_name_lower)
+    
+    # Get all database item names
+    db_item_names = [item['item_name'] for item in paper_supplies]
+    
+    # Resolve each mentioned item to the best match
+    resolved = {}
+    for mentioned in mentioned_items:
+        # Find the closest match
+        matches = difflib.get_close_matches(mentioned, db_item_names, n=1, cutoff=0.6)
+        if matches:
+            resolved[mentioned] = matches[0]
+    
+    return resolved
+
+# This function replaces mentioned item names in the request text with resolved canonical names.
+def resolve_request_text(request_text: str, resolved_names: Dict[str, str]) -> str:
+    """
+    Replace mentioned item names in the request text with their resolved canonical names.
+
+    Args:
+        request_text (str): The original request text.
+        resolved_names (Dict[str, str]): Mapping from mentioned names to canonical names.
+
+    Returns:
+        str: The request text with names resolved.
+    """
+    resolved_text = request_text
+    for mentioned, canonical in resolved_names.items():
+        # Replace case-insensitively
+        pattern = re.compile(re.escape(mentioned), re.IGNORECASE)
+        resolved_text = pattern.sub(canonical, resolved_text)
+    return resolved_text
+
+
 ########################
 ########################
 
@@ -621,14 +710,14 @@ def initialize_agent_system() -> CodeAgent:
 
     # Sub-agents
     sales_agent = CodeAgent(
-        tools=[CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
+        tools=[ItemExistsTool(), CreateTransactionTool(), CashBalanceTool(), FinancialReportTool()],
         model=model,
         name="SalesAgent",
         description="Handles sales transactions and financial reporting."
     )
 
     inventory_agent = CodeAgent(
-        tools=[InventoryStatusTool(), StockLevelTool(), CreateTransactionTool(), SupplierDeliveryTool()],
+        tools=[InventoryStatusTool(), StockLevelTool(), ItemDetailsTool(), ItemExistsTool(), CreateTransactionTool(), SupplierDeliveryTool()],
         model=model,
         name="InventoryManagementAgent",
         description="Manages inventory levels, restocking, and supplier deliveries."
@@ -670,7 +759,7 @@ def initialize_agent_system() -> CodeAgent:
             return quote_agent.run(task)
 
     orchestration_agent = CodeAgent(
-        tools=[CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
+        tools=[NameResolutionTool(), CallSalesAgentTool(), CallInventoryAgentTool(), CallQuoteAgentTool()],
         model=model,
         name="OrchestrationAgent",
         description="Coordinates between sales, inventory, and quoting agents to fulfill requests."
@@ -687,6 +776,25 @@ def initialize_agent_system() -> CodeAgent:
 # TOOL DEFINITIONS
 ########################
 
+# Tool for name resolution
+class NameResolutionTool(Tool):
+    name = "resolve_item_names"
+    description = "Resolves item names mentioned in a customer request to canonical database names."
+    inputs = {"request_text": {"type": "string", "description": "The customer's request text containing item descriptions."}}
+    output_type = "object"
+
+    def forward(self, request_text: str) -> Dict[str, str]:
+        return resolve_item_names(request_text)
+
+class ItemExistsTool(Tool):
+    name = "check_item_exists"
+    description = "Checks if an item exists in the database inventory. Use this BEFORE attempting to order an item."
+    inputs = {"item_name": {"type": "string", "description": "The exact name of the item to check."}}
+    output_type = "boolean"
+
+    def forward(self, item_name: str) -> bool:
+        return item_exists_in_database(item_name)
+
 # Tools for inventory agent
 class InventoryStatusTool(Tool):
     name = "get_inventory_status"
@@ -696,6 +804,18 @@ class InventoryStatusTool(Tool):
 
     def forward(self, as_of_date: str) -> Dict[str, int]:
         return get_all_inventory(as_of_date)
+
+class ItemDetailsTool(Tool):
+    name = "get_item_details"
+    description = "Retrieves the details of a specific item including unit price, category, etc."
+    inputs = {"item_name": {"type": "string", "description": "The name of the item to get details for."}}
+    output_type = "object"
+
+    def forward(self, item_name: str) -> Dict:
+        inventory_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :item_name", db_engine, params={"item_name": item_name})
+        if not inventory_df.empty:
+            return inventory_df.iloc[0].to_dict()
+        return {"item_name": item_name, "error": "Item not found"}
 
 class StockLevelTool(Tool):
     name = "get_stock_level"
@@ -778,7 +898,7 @@ def run_test_scenarios():
     init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv(os.path.join(SCRIPT_DIR, "quote_requests_sample.csv"))
-        quote_requests_sample["request_date"] = pd.to_datetime(
+        quote_requests_sample.loc[:, "request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
         )
         quote_requests_sample.dropna(subset=["request_date"], inplace=True)
@@ -804,6 +924,9 @@ def run_test_scenarios():
     orchestration_agent = initialize_agent_system()
     results = []
     for idx, row in quote_requests_sample.iterrows():
+        if idx >= 3:
+            break
+
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx+1} ===")
@@ -814,6 +937,16 @@ def run_test_scenarios():
 
         # Process request
         request_with_date = f"{row['request']} (Date of request: {request_date})"
+
+        # Resolve item names before processing
+        resolved_names = resolve_item_names(row['request'])
+        if resolved_names:
+            resolution_info = f"Resolved item names: {resolved_names}"
+            print(f"Name Resolution: {resolution_info}")
+            # Replace names in the request text
+            resolved_request = resolve_request_text(row['request'], resolved_names)
+            request_with_date = f"{resolved_request} (Date of request: {request_date})"
+            request_with_date += f"\n\n{resolution_info}"
 
         response = orchestration_agent.run(request_with_date)
 

@@ -1,0 +1,6 @@
+request_id,request_date,cash_balance,inventory_value,response
+1,2025-04-01,45059.7,4940.299999999999,"Order Summary:
+1. Glossy paper: 200 sheets (Transaction ID: 22)
+2. Heavy Cardstock (white): 100 sheets (Transaction ID: 23)
+3. Colored paper (assorted colors): 100 sheets (Transaction ID: 24)
+Delivery date: April 15, 2025."
