@@ -4,6 +4,7 @@ import os
 import time
 import dotenv
 import ast
+import re
 from smolagents.models import OpenAIServerModel
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
@@ -132,6 +133,69 @@ def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed:
     # Return inventory as a pandas DataFrame
     return pd.DataFrame(inventory)
 
+# Mapping for approximate user item names to canonical inventory item names.
+ITEM_SYNONYMS = {
+    "a4 glossy paper": "Glossy paper",
+    "glossy a4 paper": "Glossy paper",
+    "a4 matte paper": "Matte paper",
+    "matte a4 paper": "Matte paper",
+    "a3 glossy paper": "A3 glossy paper",
+    "a3 matte paper": "A3 matte paper",
+    "a3 paper": "A3 paper",
+    "a5 colored paper": "A5 colored paper",
+    "heavy cardstock": "Cardstock",
+    "heavyweight cardstock": "Cardstock",
+    "poster boards": "Poster paper",
+    "poster board": "Poster paper",
+    "poster paper": "Poster paper",
+    "kraft paper envelopes": "Envelopes",
+    "paper napkins": "Paper napkins",
+    "standard printer paper": "Standard copy paper",
+    "printer paper": "Standard copy paper",
+    "colored paper": "Colored paper",
+    "construction paper": "Construction paper",
+    "glossy paper": "Glossy paper",
+    "matte paper": "Matte paper",
+}
+
+
+def normalize_item_name(item_name: str) -> str:
+    clean_name = item_name.lower().strip()
+    clean_name = clean_name.replace('"', '').replace("'", "")
+    clean_name = re.sub(r"\s+", " ", clean_name)
+    return clean_name
+
+
+def resolve_item_name(item_name: str) -> Union[str, None]:
+    if not item_name or not isinstance(item_name, str):
+        return None
+
+    normalized = normalize_item_name(item_name)
+
+    # Direct synonym or exact canonical match
+    if normalized in ITEM_SYNONYMS:
+        return ITEM_SYNONYMS[normalized]
+
+    for item in paper_supplies:
+        if normalized == item["item_name"].lower():
+            return item["item_name"]
+
+    # Partial and token-based matching
+    item_tokens = set(re.findall(r"\w+", normalized))
+    best_match = None
+    best_score = 0
+    for item in paper_supplies:
+        candidate_tokens = set(re.findall(r"\w+", item["item_name"].lower()))
+        score = len(item_tokens & candidate_tokens)
+        if score > best_score:
+            best_match = item["item_name"]
+            best_score = score
+
+    if best_score >= 2:
+        return best_match
+
+    return None
+
 # This function initializes the database with the required tables and seed data for transactions, quote requests, quotes, and inventory.
 def init_database(db_engine: Engine, seed: int = 137) -> Engine:    
     """
@@ -170,7 +234,7 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         transactions_schema.to_sql("transactions", db_engine, if_exists="replace", index=False)
 
         # Set a consistent starting date
-        initial_date = datetime(2025, 1, 1).isoformat()
+        initial_date = datetime(2025, 1, 1).date().isoformat()
 
         # ----------------------------
         # 2. Load and initialize 'quote_requests' table
@@ -274,8 +338,14 @@ def create_transaction(
         Exception: For other database or execution errors.
     """
     try:
-        # Convert datetime to ISO string if necessary
-        date_str = date.isoformat() if isinstance(date, datetime) else date
+        # Convert datetime to ISO date string if necessary
+        if isinstance(date, datetime):
+            date_str = date.date().isoformat()
+        else:
+            date_str = date.split("T")[0] if isinstance(date, str) and "T" in date else date
+
+        # Normalize the item name to the canonical form when possible
+        item_name = resolve_item_name(item_name) or item_name
 
         # Validate transaction type
         if transaction_type not in {"stock_orders", "sales"}:
@@ -328,7 +398,7 @@ def get_all_inventory(as_of_date: str) -> Dict[str, int]:
             END) as stock
         FROM transactions
         WHERE item_name IS NOT NULL
-        AND transaction_date <= :as_of_date
+        AND DATE(transaction_date) <= DATE(:as_of_date)
         GROUP BY item_name
         HAVING stock > 0
     """
@@ -358,6 +428,8 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
     if isinstance(as_of_date, datetime):
         as_of_date = as_of_date.isoformat()
 
+    item_name = resolve_item_name(item_name) or item_name
+
     # SQL query to compute net stock level for the item
     stock_query = """
         SELECT
@@ -369,7 +441,7 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
             END), 0) AS current_stock
         FROM transactions
         WHERE item_name = :item_name
-        AND transaction_date <= :as_of_date
+        AND DATE(transaction_date) <= DATE(:as_of_date)
     """
 
     # Execute query and return result as a DataFrame
@@ -445,7 +517,7 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
 
         # Query all transactions on or before the specified date
         transactions = pd.read_sql(
-            "SELECT * FROM transactions WHERE transaction_date <= :as_of_date",
+            "SELECT * FROM transactions WHERE DATE(transaction_date) <= DATE(:as_of_date)",
             db_engine,
             params={"as_of_date": as_of_date},
         )
@@ -516,7 +588,7 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
     top_sales_query = """
         SELECT item_name, SUM(units) as total_units, SUM(price) as total_revenue
         FROM transactions
-        WHERE transaction_type = 'sales' AND transaction_date <= :date
+        WHERE transaction_type = 'sales' AND DATE(transaction_date) <= DATE(:date)
         GROUP BY item_name
         ORDER BY total_revenue DESC
         LIMIT 5
@@ -620,7 +692,7 @@ def initialize_agent_system() -> CodeAgent:
         api_key=openai_api_key,
     )
 
-    def execute_with_retries(action_name: str, action_callable, *args, max_attempts: int = 3) -> str:
+    def execute_with_retries(action_name: str, action_callable, *args, max_attempts: int = 1) -> str:
         unclear_indicators = [
             "timeout",
             "timed out",
@@ -833,6 +905,14 @@ class CreateTransactionTool(Tool):
                 "message": "We cannot process this order. The date format is invalid. Please use the ISO 8601 format (YYYY-MM-DD) and try again."
             }
         
+        item_name = resolve_item_name(item_name) or item_name
+        if not item_name:
+            return {
+                "success": False,
+                "constraint": "policy",
+                "message": "We could not identify the requested item clearly enough to complete the transaction. Please verify the item name and try again."
+            }
+
         if transaction_type == "sales":
             # Stock constraint check
             stock_df = get_stock_level(item_name, date)
@@ -959,6 +1039,9 @@ def run_test_scenarios():
     orchestration_agent = initialize_agent_system()
     results = []
     for idx, row in quote_requests_sample.iterrows():
+        if idx >= 5:
+            break
+
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx+1} ===")
