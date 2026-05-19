@@ -773,23 +773,39 @@ class QuotingAgent(ToolCallingAgent):
 
             Step 2. Check inventory levels and delivery timelines using the InventoryAgent, which has access to tools for checking current stock levels, minimum stock thresholds, and supplier delivery estimates.
             Ask the inventory agent to check if there is sufficient stock to fulfill the request based on the order details, and to estimate the delivery date for any items that need to be ordered from the supplier.
+            CRITICAL: All delivery dates MUST be calculated from the request date provided in the order details, not from today's date or any other reference date.
             Exact task instructions for the inventory agent:
             - Extract the relevant item names and quantities from the order details.
             - For each item, use the has_sufficient_stock tool to check if there is enough stock to fulfill the required quantity as of the request date.
-            - If any item does not have sufficient stock, use the check_delivery_date tool to estimate the delivery date for the required quantity of that item based on the request date.
+            - If any item does not have sufficient stock, use the check_delivery_date tool to estimate the delivery date for the required quantity of that item. CRITICAL: Pass the request date from order_details as the input to check_delivery_date, NOT today's date or any other date.
 
             Step 3. Based on the information gathered in steps 1 and 2, generate a quote for the customer request.
+            CRITICAL LOGIC: Each item in the order must fall into EXACTLY ONE of these mutually exclusive categories:
+            - FULFILLED: Item is in stock. Set "is_in_stock": true, "fulfilled": true, "delivery_date": today or request_date
+            - OUT_OF_STOCK_WITH_DELIVERY: Item is out of stock but can be ordered. Set "is_in_stock": false, "fulfilled": false, "delivery_date": calculated supplier delivery date (MUST be in the future from request date)
+            - CANNOT_FULFILL: Item cannot be fulfilled at all. Set "is_in_stock": false, "fulfilled": false, "delivery_date": null, "reason": explanation
+            
+            An item CANNOT be in both "fulfilled" and "out of stock" states simultaneously. This is a logical error that must be avoided.
+
             - If a similar quote was found in the history, use it as a reference for pricing, but adjust the quote as necessary based on current inventory availability and delivery timelines.
             - If no similar quote was found, generate a new quote based on the order details, inventory availability, and delivery timelines.
-            - For each item in the order, use the stock availability and delivery information to determine if the item can be included in the quote, and if so, at what price (based on unit price and any applicable adjustments).
+            - For each item in the order, use the stock availability and delivery information to determine which category it falls into (FULFILLED, OUT_OF_STOCK_WITH_DELIVERY, or CANNOT_FULFILL).
             - Ensure that the total amount for the quote is calculated correctly based on the included items and their prices (total price for each item = unit price * quantity, and total quote amount = sum of total prices for included items).
             - Provide a clear explanation for the quote, including any assumptions made, adjustments based on inventory or delivery constraints, and references to similar historical quotes if applicable.
 
-            Return the generated quote as a JSON dictionary containing 
+            Return the generated quote as a JSON dictionary containing:
             - the request date
             - the needed by date
-            - a list of items included in the quote with their names, quantities, unit prices, total prices, whether they are in stock, whether the order is fulfilled
-            - the total amount
+            - a list of items with their fulfillment status:
+              * item_name
+              * quantity
+              * unit_price
+              * total_price
+              * is_in_stock: boolean
+              * fulfilled: boolean (true ONLY if item is in stock and will be sent immediately)
+              * delivery_date: ISO date (YYYY-MM-DD) or null if cannot fulfill. MUST be in future if out of stock.
+              * reason: explanation if item cannot be fulfilled
+            - the total amount (sum of prices for items that can be fulfilled)
             - the quote explanation
 
             The returned object should be a JSON dictionary and nothing else. Do not include any text outside of the JSON dictionary in your response.
@@ -849,38 +865,98 @@ class OrderingAgent(ToolCallingAgent):
     def place_order(self, quote: Dict) -> Dict[str, int]:
         """
         Places an order based on the provided quote. First checks the current cash balance to ensure sufficient funds, then records the sales transaction if the order can be fulfilled.
+        
+        CRITICAL: Only charges for items marked as "fulfilled": true. Items with "fulfilled": false 
+        (out of stock, pending supplier delivery) are NOT charged at this time.
         """
+        # # GUARDRAIL: Check if there are sufficient funds before attempting to place order
+        # fulfilled_items = [item for item in quote.get('items', []) if item.get('fulfilled', False)]
+        # total_cost = sum(item.get('unit_price', 0) * item.get('quantity', 0) for item in fulfilled_items)
+        
+        # # Get current cash balance as of the quote's request date
+        # request_date = quote.get('request_date', datetime.now().strftime('%Y-%m-%d'))
+        # current_balance = get_current_cash_balance(request_date)
+        
+        # # If insufficient funds for fulfilled items, return error immediately
+        # if current_balance < total_cost:
+        #     return {
+        #         "items_fulfilled": [],
+        #         "items_out_of_stock": [],
+        #         "items_cannot_fulfill": [item['item_name'] for item in fulfilled_items],
+        #         "amount_charged": 0,
+        #         "updated_cash_balance": current_balance,
+        #         "explanation": f"Order cannot be placed: Insufficient funds. Required: ${total_cost:.2f}, Available: ${current_balance:.2f}",
+        #         "error": "INSUFFICIENT_FUNDS"
+        #     }
+        
         response = self.run(
             f"""You are an ordering agent for Munder Difflin. Your task is to place an order based on a generated quote and manage the financial transactions accordingly.
 
+            CRITICAL FULFILLMENT & CHARGING RULES:
+            ==========================================
+            Rule 1 - ONLY CHARGE FOR FULFILLED ITEMS:
+            - Items with "fulfilled": true = IN STOCK, READY TO SHIP, CHARGE CUSTOMER NOW
+            - Items with "fulfilled": false = OUT OF STOCK, PENDING SUPPLIER DELIVERY, DO NOT CHARGE NOW
+            
+            Rule 2 - CALCULATE CORRECT TOTAL:
+            - Total amount to charge = SUM of (unit_price * quantity) for ONLY items where "fulfilled": true
+            - Do NOT include prices for items where "fulfilled": false in the charge total
+            
+            Rule 3 - VERIFY FULFILLMENT STATUS:
+            - Examine each item in the quote's items list
+            - Look at the "fulfilled" field for each item (true or false)
+            - Items with "fulfilled": false should be listed as "out of stock" or "pending" in your response
+            - Items with "fulfilled": true should be listed as "charged" or "successfully ordered" in your response
+
             Given the following quote details: {json.dumps(quote)}, accomplish the following steps:
 
-            Step 1. Check the current cash balance using the get_current_cash_balance tool to ensure that there are sufficient funds to cover the total amount of the quote.
-            - If the cash balance is sufficient to cover the total amount of the quote, proceed to step 2.
-            - If the cash balance is insufficient, return a response indicating that the order cannot be placed due to insufficient funds.
+            Step 1. ANALYZE FULFILLMENT STATUS:
+            - Extract all items from the quote.
+            - Separate items into two categories:
+              a) FULFILLED ITEMS: Items where "fulfilled": true
+              b) NON-FULFILLED ITEMS: Items where "fulfilled": false
+            - Calculate the total amount to charge based ONLY on fulfilled items.
 
-            Step 2. For each item in the quote that is marked as fulfilled, use the place_sales_order tool to record a sales transaction in the database.
-            - Extract the item name, quantity, total price, and transaction date for each fulfilled item from the quote details.
-            - Call the place_sales_order tool with these details to create a transaction record for each item.
+            Step 2. VERIFY CASH AVAILABILITY FOR FULFILLED ITEMS:
+            - Use get_current_cash_balance tool to check the current cash balance.
+            - Compare the current cash balance to the total amount calculated for FULFILLED ITEMS ONLY.
+            - If the cash balance is sufficient to cover the fulfilled items, proceed to step 3.
+            - If the cash balance is insufficient, return a response indicating the order cannot be placed due to insufficient funds and CRITICAL: Do NOT attempt to place any sales orders if funds are insufficient.
 
-            Step 3. After placing all sales orders for fulfilled items, generate an updated financial report using the generate_financial_report tool to reflect the new cash balance and inventory status after processing the order.
+            Step 3. RECORD SALES FOR FULFILLED ITEMS ONLY:
+            - For EACH item where "fulfilled": true, call the place_sales_order tool with:
+              * item_name (from the quote)
+              * quantity (from the quote)
+              * total_price (unit_price * quantity from the quote)
+              * transaction_date (from the quote's request_date)
+            - CRITICAL: Do NOT call place_sales_order for any items where "fulfilled": false
+            - Each place_sales_order call records a real sale and deducts from cash balance
 
+            Step 4. GENERATE UPDATED FINANCIAL REPORT:
+            - After placing all sales orders for fulfilled items, use the generate_financial_report tool.
+            - This reflects the new cash balance after charging for fulfilled items only.
+
+            Step 5. PREPARE ORDER RESPONSE:
             Return a JSON dictionary containing:
-            - A summary of which items were ordered and their quantities
-            - The total amount of the order
-            - The updated cash balance after placing the order
-            - Any items that could not be ordered due to insufficient stock or other constraints
-            - A clear explanation of any issues encountered during order placement (e.g., insufficient funds, stock shortages) and how they were handled.
+            - "items_fulfilled": List of items that were charged (fulfilled: true)
+            - "items_out_of_stock": List of items pending supplier delivery (fulfilled: false)
+            - "items_cannot_fulfill": List of items that cannot be fulfilled at all
+            - "amount_charged": Total amount charged (ONLY for fulfilled items)
+            - "updated_cash_balance": New cash balance after charging for fulfilled items
+            - "explanation": Clear explanation distinguishing what was charged vs. what is pending/unfulfilled
+
+            CRITICAL VALIDATION:
+            - Verify that "amount_charged" matches the sum of prices for items where "fulfilled": true
+            - Verify that you called place_sales_order exactly once per fulfilled item (no more, no less)
+            - Never charge for items where "fulfilled": false
+            - Ensure that the updated cash balance reflects only the charges for fulfilled items
+            - Do not place orders when funds are insufficient, and return an appropriate error message instead
 
             The returned object should be a JSON dictionary and nothing else. Do not include any text outside of the JSON dictionary in your response.
             """
         )
-        if isinstance(response, dict):
-            order_response = response
-        else:
-            order_response = json.loads(str(response))
-
-        return order_response
+        
+        return response
     
 class CommunicationsAgent(ToolCallingAgent):
     def __init__(self, model) -> None:
@@ -964,6 +1040,24 @@ class CommunicationsAgent(ToolCallingAgent):
             flags=re.IGNORECASE
         )
         
+        # Pattern 7: Remove past-dated delivery date statements
+        # Matches: "October 6, 2023", "2023-10-09", "October 22, 2023", "November 4, 2023" etc.
+        # Captures lines mentioning delivery with years clearly in the past (2023 or earlier)
+        sanitized = re.sub(
+            r'.*\b(?:(?:delivery|deliver|available|will\s+be\s+ready|expected|estimated)\b.*?(?:2023|2022|2021|2020|2019|2018|2017|2016|2015|2014|2013|2012|2011|2010)).*?\n?',
+            '',
+            sanitized,
+            flags=re.MULTILINE | re.IGNORECASE
+        )
+        
+        # Pattern 7b: Also remove lines with impossible month-day date patterns like "October 6, 2023" when they appear in delivery contexts
+        sanitized = re.sub(
+            r'.*\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(?:\d{1,2},?\s+)?2023.*?\n?',
+            '',
+            sanitized,
+            flags=re.MULTILINE | re.IGNORECASE
+        )
+        
         # Clean up extra blank lines that may have been left behind
         sanitized = re.sub(r'\n\n\n+', '\n\n', sanitized)
         sanitized = sanitized.strip()
@@ -985,6 +1079,24 @@ class CommunicationsAgent(ToolCallingAgent):
         response = self.run(
             f"""You are a communications agent for Munder Difflin. Your task is to manage communications with customers regarding the fulfillment status of their orders.
 
+            CRITICAL LOGIC RULES - PREVENT CONTRADICTORY STATEMENTS:
+            ========================================================
+            RULE 1: An item CANNOT be BOTH "successfully ordered/fulfilled" AND "out of stock" in the same message.
+            Each item falls into EXACTLY ONE category:
+            - FULFILLED: Item is in stock and will be shipped. Say: "Successfully ordered: [item] [qty]"
+            - OUT_OF_STOCK: Item is not available now. Say: "[Item] is currently out of stock. Estimated delivery: [DATE]"
+            - CANNOT_FULFILL: Item cannot be ordered at all. Say: "[Item] could not be fulfilled due to [REASON]"
+
+            RULE 2: Delivery dates must be REALISTIC FUTURE dates from the order date.
+            - Check all delivery dates in the order response. They MUST be in the future relative to the order date.
+            - If a delivery date appears to be in the past (e.g., October 2023 for an order from April 2025), this is an ERROR. Do NOT use that date.
+            - Only include delivery dates that are valid future dates (today or later).
+
+            RULE 3: Cash impact reflects fulfillment only.
+            - If items are "successfully ordered" and charged to the customer, the cash balance should show a deduction.
+            - If items are "out of stock", they should NOT be charged yet (no cash deduction).
+            - Verify consistency: fulfilled items = cash deduction, out-of-stock items = no deduction.
+
             CRITICAL GUARDRAILS - DO NOT INCLUDE IN CUSTOMER MESSAGE:
             ========================================================
             You MUST NOT include any of the following in your customer communication:
@@ -998,26 +1110,32 @@ class CommunicationsAgent(ToolCallingAgent):
             APPROVED INFORMATION TO INCLUDE:
             ================================
             You MAY include:
-            - Item names and quantities successfully ordered
+            - Item names and quantities that were fulfilled (in stock, shipped immediately)
             - The TOTAL ORDER AMOUNT (e.g., "Your order total is $65.00") - this is customer-facing pricing
+            - Items that are out of stock with realistic estimated delivery dates (future dates only)
             - Items that could not be ordered and WHY (e.g., "insufficient stock", "missing pricing data")
-            - Estimated delivery dates for out-of-stock items
             - Clear, empathetic explanations of any order processing issues
             - Professional next steps or recommendations
 
             Given the following order response details: {json.dumps(order_response)}, accomplish the following steps:
 
-            Step 1. Analyze the order response details to determine the fulfillment status of the customer's order, including which items were fulfilled, any issues encountered during processing (e.g., insufficient funds, stock shortages), and the final outcome of the order.
+            Step 1. Analyze the order response details to determine the fulfillment status of the customer's order.
+            - IMPORTANT: Carefully separate items that are FULFILLED from items that are OUT_OF_STOCK or CANNOT_FULFILL.
+            - Verify all delivery dates are realistic future dates relative to the order date.
             
-            Step 2. Craft a clear and informative communication message to the customer that summarizes the status of their order, including:
-            - A summary of which items were successfully ordered and their quantities
-            - The total amount of the order (customer-facing pricing only)
-            - Any items that could not be ordered and the reasons why (e.g., insufficient stock, item not in system)
-            - A clear explanation of any issues encountered during order processing and how they were handled
+            Step 2. Craft a clear and informative communication message to the customer that summarizes the status of their order:
+            - Section 1: Clearly list items that were successfully ordered and immediately fulfilled with quantities
+            - Section 2: If applicable, list items that are out of stock with realistic future delivery dates
+            - Section 3: If applicable, list items that could not be fulfilled and explain why
+            - Section 4: Include the total order amount (only for fulfilled items charged to customer)
+            - CRITICAL: Never mix "successfully ordered" and "out of stock" language for the same item in the same sentence/paragraph.
             - Professional tone with appropriate empathy where needed
 
-            REMINDER: Ensure your final message does NOT contain any cash balances, account balances, transaction IDs, internal financial details, or internal reasoning steps. 
-            Focus ONLY on order status, items, and fulfillment information relevant to the customer.
+            REMINDER: Ensure your final message does NOT contain:
+            - Any cash balances, account balances, transaction IDs, or internal financial details
+            - Any contradictory statements (item cannot be both fulfilled AND out of stock)
+            - Any past-dated delivery dates
+            Focus ONLY on clear, consistent order status information relevant to the customer.
 
             Return ONLY the customer-facing message. Do not include any explanations, step-by-step analysis, or metadata. Just the message itself.
             """
